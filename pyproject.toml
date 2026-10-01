@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freshdesk-connector"
+version = "0.1.0"
+description = "Read-only Freshdesk connector (MCP server) for Agent Studio agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27,<1",
+  "mcp>=1.10,<2",
+  "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "fastapi>=0.110", "uvicorn>=0.29"]
+
+[project.scripts]
+freshdesk-connector = "freshdesk_connector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src", "."]
