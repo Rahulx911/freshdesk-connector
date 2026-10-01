@@ -1,0 +1,40 @@
+# Local production-like stack: 2 connector replicas sharing a Redis rate budget,
+# a mock Freshdesk, and a tenant registry with file-mounted secrets.
+#   scripts/smoke_compose.sh   (mints a token, writes deploy/secrets, starts everything, tests it)
+services:
+  redis:
+    image: redis:7-alpine
+    # private compose network only; production Redis should require AUTH/TLS (rediss://user:pass@...)
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--protected-mode", "no"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 10}
+
+  mock-freshdesk:
+    image: freshdesk-mock:local
+    build: {context: ., dockerfile: deploy/Dockerfile.mock}
+    environment: {MOCK_RATE_LIMIT: "50"}
+    ports: ["8765"]
+
+  connector:
+    image: freshdesk-connector:local
+    build: .
+    deploy: {replicas: 2}
+    depends_on:
+      redis: {condition: service_healthy}
+      mock-freshdesk: {condition: service_started}
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      METRICS_TOKEN_FILE: /run/secrets/metrics_token
+      FRESHDESK_PRIVATE_NOTES: exclude
+      FRESHDESK_INSECURE_HTTP_HOSTS: mock-freshdesk   # test stack only; real tenants use https
+    read_only: true
+    tmpfs: ["/tmp"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./deploy/tenants.json:/etc/freshdesk-connector/tenants.json:ro
+      - ./deploy/secrets:/run/secrets:ro
+    ports: ["8000"]          # ephemeral host ports; `docker compose port --index N connector 8000`
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status == 200 else 1)"]
+      interval: 5s
+      retries: 10

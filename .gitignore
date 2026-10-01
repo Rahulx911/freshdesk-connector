@@ -6,3 +6,7 @@ __pycache__/
 .env
 credentials.json
 .coverage
+deploy/tenants.json
+deploy/secrets/
+evals/report.*
+.coverage*
