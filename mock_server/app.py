@@ -38,7 +38,7 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
     integrations (Freshdesk quotas are per account, shared by every app)."""
     limit = rate_limit_per_min or int(os.environ.get("MOCK_RATE_LIMIT", "100"))
     state = {"hits": deque([clock()] * external_usage), "fails_left": fail_first_n, "requests": 0,
-             "deny_ticket_fields": False, "throttled": 0}
+             "deny_ticket_fields": False, "throttled": 0, "paths": {}}
     app = FastAPI(title="Mock Freshdesk")
     app.state.mock = state
 
@@ -48,6 +48,7 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
             return JSONResponse({"requests": state["requests"], "throttled_429": state["throttled"],
                                  "credits_in_window": len(state["hits"]), "limit": limit})
         state["requests"] += 1
+        state["paths"][request.url.path] = state["paths"].get(request.url.path, 0) + 1
         auth = request.headers.get("authorization", "")
         ok = False
         if auth.startswith("Basic "):
