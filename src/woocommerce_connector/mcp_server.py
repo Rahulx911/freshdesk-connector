@@ -96,8 +96,30 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
 
     ro = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
 
+    def tool(**kwargs):
+        """Register a tool with its docstring normalised.
+
+        Python 3.13 strips common leading whitespace from docstrings and older
+        versions do not, so the same source would otherwise serve differently
+        indented tool descriptions depending on the interpreter. Normalising
+        here keeps the exported spec byte-identical across 3.10 to 3.13, which
+        is what makes the committed spec checkable in CI.
+        """
+        def decorate(fn):
+            if fn.__doc__:
+                fn.__doc__ = inspect.cleandoc(fn.__doc__)
+            return mcp.tool(**kwargs)(fn)
+        return decorate
+
+    def prompt(**kwargs):
+        def decorate(fn):
+            if fn.__doc__:
+                fn.__doc__ = inspect.cleandoc(fn.__doc__)
+            return mcp.prompt(**kwargs)(fn)
+        return decorate
+
     # ------------------------------------------------------------- orders
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def list_orders(
         status: list[str] | None = None,
         created_after: str | None = None,
@@ -118,7 +140,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
             status=status, created_after=created_after, created_before=created_before,
             page=page, per_page=per_page))
 
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def search_orders(
         status: list[str] | None = None,
         search: str | None = None,
@@ -145,7 +167,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
             customer_id=customer_id, product_id=product_id, order_by=order_by,
             direction=direction, page=page, per_page=per_page))
 
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def get_order(order_id: int, max_refunds: int = 20) -> str:
         """Get one order in full, with line items, refund rows and signals.
 
@@ -156,7 +178,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
         return await _call("get_order", locals(),
                            lambda s: s.get_order(order_id, max_refunds=max_refunds))
 
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def list_order_refunds(order_id: int, page: int | None = None,
                                  per_page: int | None = None) -> str:
         """List the refund rows recorded against one order.
@@ -169,7 +191,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
             order_id, page=page, per_page=per_page))
 
     # ----------------------------------------------------------- products
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def list_products(
         status: list[str] | None = None,
         stock_status: str | None = None,
@@ -189,7 +211,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
             status=status, stock_status=stock_status, search=search, sku=sku,
             order_by=order_by, direction=direction, page=page, per_page=per_page))
 
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def get_product(product_id: int) -> str:
         """Get one product: price, sale price, stock level, SKU and a short
         description.
@@ -201,7 +223,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
         return await _call("get_product", locals(), lambda s: s.get_product(product_id))
 
     # ---------------------------------------------------------- customers
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def find_customers(
         search: str | None = None,
         email: str | None = None,
@@ -217,12 +239,12 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
         return await _call("find_customers", locals(), lambda s: s.find_customers(
             search=search, email=email, page=page, per_page=per_page))
 
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def get_customer(customer_id: int) -> str:
         """Get one customer account, with order count and lifetime spend."""
         return await _call("get_customer", locals(), lambda s: s.get_customer(customer_id))
 
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def customer_order_history(
         customer_id: int | None = None,
         email: str | None = None,
@@ -239,7 +261,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
             customer_id=customer_id, email=email, limit=limit))
 
     # --------------------------------------------------------------- ops
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def store_pulse(days: int = 14, scan: int = 100, top: int = 10) -> str:
         """What needs attention in the store right now, ranked with reasons.
 
@@ -255,7 +277,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
         return await _call("store_pulse", locals(),
                            lambda s: s.store_pulse(days=days, scan=scan, top=top))
 
-    @mcp.tool(annotations=ro)
+    @tool(annotations=ro)
     async def connector_status() -> str:
         """Check the connection, the key's visibility and the rate budget.
 
@@ -265,7 +287,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
         return await _call("connector_status", {}, lambda s: s.connector_status())
 
     # ------------------------------------------------------------ prompts
-    @mcp.prompt()
+    @prompt()
     def resolve_payment_question(order_reference: str) -> str:
         """Safely answer 'where is my refund / was I charged twice?'."""
         return inspect.cleandoc(f"""
@@ -289,7 +311,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
                does not say, say that a human will confirm.
         """)
 
-    @mcp.prompt()
+    @prompt()
     def daily_store_review() -> str:
         """Morning triage for a shop manager."""
         return inspect.cleandoc("""
