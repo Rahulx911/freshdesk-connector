@@ -81,4 +81,4 @@ def test_export_spec_matches_committed_file(tmp_path):
     fresh = json.loads(out.read_text())
     committed = json.loads((ROOT / "docs" / "mcp_tool_spec.json").read_text())
     assert fresh == committed, "docs/mcp_tool_spec.json is stale: run `freshdesk-connector export-spec -o docs/mcp_tool_spec.json`"
-    assert len(fresh["tools"]) == 10
+    assert len(fresh["tools"]) == 11

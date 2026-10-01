@@ -10,7 +10,7 @@ from freshdesk_connector import mcp_server
 EXPECTED = {
     "list_tickets", "search_tickets", "get_ticket", "list_ticket_conversations",
     "find_contacts", "get_contact", "customer_ticket_history", "get_company",
-    "find_companies", "connector_status",
+    "find_companies", "connector_status", "support_pulse",
 }
 
 
@@ -49,3 +49,18 @@ async def test_tool_error_is_structured(wired):
         await mcp_server.mcp.call_tool("get_ticket", {"ticket_id": 424242})
     body = json.loads(str(e.value).split("Error executing tool get_ticket: ")[-1])
     assert body["error"] == "not_found" and "hint" in body
+
+
+async def test_prompts_are_registered_and_render():
+    prompts = {p.name: p for p in await mcp_server.mcp.list_prompts()}
+    assert {"resolve_payment_ticket", "daily_triage"} <= set(prompts)
+    res = await mcp_server.mcp.get_prompt("resolve_payment_ticket", {"ticket_id": "42"})
+    text = res.messages[0].content.text
+    assert "ticket 42" in text and "payment_refs" in text and "Never promise" in text
+
+
+async def test_support_pulse_tool_roundtrip(wired):
+    result = await mcp_server.mcp.call_tool("support_pulse", {"top": 3})
+    payload = result[1] if isinstance(result, tuple) else result
+    text = json.dumps(payload, default=str)
+    assert "needs_attention" in text and "payment_tickets" in text

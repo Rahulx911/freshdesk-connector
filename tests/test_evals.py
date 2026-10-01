@@ -21,7 +21,7 @@ def test_oracle_mode_passes(tmp_path):
     p = subprocess.run([sys.executable, "-m", "evals.run", "--oracle", "--report", str(tmp_path / "r.md")],
                        cwd=ROOT, capture_output=True, text=True, timeout=180)
     assert p.returncode == 0, p.stdout + p.stderr
-    assert "15/15 passed" in (tmp_path / "r.md").read_text()
+    assert "19/19 passed" in (tmp_path / "r.md").read_text()
 
 
 def test_numeric_facts_need_word_boundaries():
