@@ -10,3 +10,4 @@ deploy/tenants.json
 deploy/secrets/
 evals/report.*
 .coverage*
+CLAUDE.local.md
