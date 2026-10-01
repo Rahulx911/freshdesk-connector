@@ -120,6 +120,16 @@ async def run_session(base_url: str, api_key: str, *, live: bool) -> None:
             if t5 and t5.get("conversations_truncated"):
                 await call(session, "list_ticket_conversations", {"ticket_id": 5, "page": 2, "per_page": 10})
 
+        if not live:
+            print(f"\n{BOLD}== Payment-aware signals (Razorpay refs, intent, SLA) and triage{RESET}")
+            t2 = await call(session, "get_ticket", {"ticket_id": 2, "max_conversations": 5})
+            refs = {r["value"] for r in (t2 or {}).get("signals", {}).get("payment_refs", [])}
+            call.results.append({"pay_KL10201QzXwVuT", "rfnd_KL10201RrSsTtU"} <= refs)
+            print(f"  {GREEN if call.results[-1] else RED}refs found:{RESET} {sorted(refs)}")
+            pulse = await call(session, "support_pulse", {"top": 3})
+            for a in (pulse or {}).get("needs_attention", []):
+                print(f"  #{a['id']} score={a['score']} {a['subject'][:40]!r} <- {', '.join(a['why'])}")
+
         print(f"\n{BOLD}== Customers & companies{RESET}")
         if not live:
             await call(session, "customer_ticket_history", {"email": "kabir.nair@example.com", "limit": 5})
