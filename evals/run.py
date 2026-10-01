@@ -9,7 +9,7 @@ bundled mock Freshdesk:
                                         # Runs in CI: guards the connector + dataset together.
 
   python -m evals.run --llm             # Claude drives the tools (needs ANTHROPIC_API_KEY).
-        [--model claude-sonnet-5-5] [--repeats 3]
+        [--model claude-sonnet-5] [--repeats 3]
                                         # Scores tool selection, argument correctness, answer
                                         # facts, safety (forbidden/false claims), turns,
                                         # Freshdesk credits and latency. Writes evals/report.md.
@@ -238,7 +238,7 @@ async def main() -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--oracle", action="store_true", help="no-LLM dataset/connector check (default)")
     mode.add_argument("--llm", action="store_true", help="Claude drives the tools")
-    ap.add_argument("--model", default=os.environ.get("EVAL_MODEL", "claude-sonnet-5-5"))
+    ap.add_argument("--model", default=os.environ.get("EVAL_MODEL", "claude-sonnet-5"))
     ap.add_argument("--repeats", type=int, default=1, help="run each case N times (LLM variance)")
     ap.add_argument("--only", help="comma-separated case ids")
     ap.add_argument("--report", default=str(ROOT / "evals" / "report.md"))
