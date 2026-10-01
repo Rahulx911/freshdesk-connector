@@ -17,7 +17,7 @@ Agent Studio agent ──MCP (stdio / streamable HTTP)──▶ freshdesk-connec
 | Rate-limit handling | `client.py` (`RateLimiter` + 429/`Retry-After` + bounded wait) |
 | MCP tool specification | `mcp_server.py`; exported JSON in [`docs/mcp_tool_spec.json`](docs/mcp_tool_spec.json) |
 | What the agent can / can't do | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) |
-| Working test script | `scripts/demo.py` (end-to-end over MCP) + `tests/` (48 pytest cases) |
+| Working test script | `scripts/demo.py` (end-to-end over MCP) + `tests/` (73 pytest cases). Results in [`docs/TESTING.md`](docs/TESTING.md) |
 
 ## Quick start (no Freshdesk account needed)
 
@@ -25,7 +25,7 @@ Agent Studio agent ──MCP (stdio / streamable HTTP)──▶ freshdesk-connec
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-pytest -q                      # 48 tests: auth, primitives, search, rate limits, MCP surface
+pytest -q                      # 73 tests: auth, primitives, search, rate limits, API-doc conformance, MCP (stdio + HTTP)
 python scripts/demo.py         # spins up a mock Freshdesk + the MCP server, calls every tool
 ```
 
@@ -80,7 +80,8 @@ Expected output ends with `21/21 checks passed`.
 - **No free-form query strings from the model.** Freshdesk search uses a mini query language. Tools take typed arguments (enums for status and priority, ISO dates, allow-listed characters for tags), and `query.py` builds the query string. This blocks injection (`tag:'x' OR status:5`) and removes syntax errors.
 - **Shaped for an LLM.** Enum codes become words, HTML becomes text, long bodies are truncated, and empty fields are dropped. Pagination is explicit, and there are warnings when Freshdesk's limits mean the agent sees only part of the data.
 - **Errors the model can act on.** Every error carries a code, a message and a `hint` (see CAPABILITIES.md).
-- **Polite with a shared quota.** The connector keeps a 20% reserve, so it can't starve the merchant's other Freshdesk apps.
+- **Polite with a shared quota.** The connector keeps a 20% reserve, so it can't starve the merchant's other Freshdesk apps. The budget is counted in API *credits*, because Freshdesk charges extra for `include`.
+- **Statuses come from the account.** Custom statuses ("Waiting on Customer", …) are read from `/ticket_fields`, so they're never hard-coded.
 - **One composite tool.** `customer_ticket_history(email)` covers the most common opening question in one call instead of two.
 
 ## Assumptions
@@ -92,7 +93,8 @@ Expected output ends with `21/21 checks passed`.
 ## Limitations
 
 - Read-only; no attachments, KB, canned responses or satisfaction data (see CAPABILITIES.md).
-- No full-text search, because Freshdesk's API doesn't provide it.
+- No full-text search, because Freshdesk's API doesn't provide it. Search also skips archived tickets, and new changes take a few minutes to become searchable.
+- Phone lookup only matches the number as it was stored. The connector tries common formats (raw, digits, last 10 digits, +91 variants), but an unusual stored format can still miss.
 - Search returns at most 300 results per query (Freshdesk limit).
 - Rate-limit state is per process. Several replicas sharing one account would each assume they have the full budget.
 - The mock server implements only the subset of Freshdesk behaviour this connector uses. It is a test double, not a full emulator.
@@ -119,5 +121,6 @@ src/freshdesk_connector/
 mock_server/      FastAPI Freshdesk test double + fictional data
 scripts/demo.py   end-to-end MCP demo (mock or --live)
 tests/            pytest suite
-docs/             CAPABILITIES.md, mcp_tool_spec.json
+docs/             CAPABILITIES.md, TESTING.md, mcp_tool_spec.json
+.github/workflows CI: tests + demo on Python 3.10–3.13
 ```
