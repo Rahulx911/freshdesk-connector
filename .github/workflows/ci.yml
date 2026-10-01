@@ -1,11 +1,29 @@
-name: tests
+name: ci
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  quality:
+    name: lint, types, security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: mypy
+      - run: bandit -q -r src
+      - name: Dependency vulnerability audit (hash-pinned lockfile)
+        run: pip-audit --strict -r requirements.lock --require-hashes
+
   test:
+    name: tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -14,10 +32,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[dev]" pytest-cov
-      - name: Unit, conformance and integration tests
-        run: pytest -q --cov=freshdesk_connector --cov-report=term
+        with: {python-version: "${{ matrix.python-version }}"}
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
+      - run: pip install -e ".[dev]"
+      - name: Unit, conformance, integration and production tests
+        run: pytest -q --cov --cov-report=term
       - name: End-to-end MCP demo against mock Freshdesk
         run: python scripts/demo.py
+
+  evals:
+    name: agent evals
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e ".[dev]"
+      - run: python -m evals.run --oracle
+      - name: LLM evals (only when an API key secret is configured)
+        if: env.ANTHROPIC_API_KEY != ''
+        run: pip install -e ".[evals]" && python -m evals.run --llm --repeats 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: eval-report, path: "evals/report.*"}
+
+  container:
+    name: docker image + compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e ".[dev]"
+      - name: Build, run 2 replicas + Redis + mock, test auth/health/budget/metrics/log hygiene
+        run: bash scripts/smoke_compose.sh
+      - if: failure()
+        run: cat /tmp/compose.log || true
