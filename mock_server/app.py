@@ -38,12 +38,15 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
     integrations (Freshdesk quotas are per account, shared by every app)."""
     limit = rate_limit_per_min or int(os.environ.get("MOCK_RATE_LIMIT", "100"))
     state = {"hits": deque([clock()] * external_usage), "fails_left": fail_first_n, "requests": 0,
-             "deny_ticket_fields": False}
+             "deny_ticket_fields": False, "throttled": 0}
     app = FastAPI(title="Mock Freshdesk")
     app.state.mock = state
 
     @app.middleware("http")
     async def gate(request: Request, call_next):
+        if request.url.path == "/__mock/stats":          # test-only introspection, no auth
+            return JSONResponse({"requests": state["requests"], "throttled_429": state["throttled"],
+                                 "credits_in_window": len(state["hits"]), "limit": limit})
         state["requests"] += 1
         auth = request.headers.get("authorization", "")
         ok = False
@@ -62,6 +65,7 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
             hits.popleft()
         cost = request_cost(request)
         if len(hits) + cost > limit:
+            state["throttled"] += 1
             retry = max(1, int(60 - (now - hits[0])) + 1) if hits else 60
             return JSONResponse({"message": "Rate limit exceeded"}, status_code=429,
                                 headers={"Retry-After": str(retry), "X-RateLimit-Total": f"{limit}.0",
@@ -260,4 +264,4 @@ def _compile_query(raw: str):
     return lambda t: all(p(t) for p in preds)
 
 
-app = create_app()
+app = create_app(api_key=os.environ.get("MOCK_API_KEY", MOCK_API_KEY))
