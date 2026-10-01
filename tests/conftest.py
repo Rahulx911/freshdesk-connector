@@ -35,14 +35,15 @@ def make_service(clock):
     created = []
 
     def _make(*, api_key=MOCK_API_KEY, server_limit=100, fail_first_n=0, client_limit=None,
-              reserve=0.2, max_wait_s=20.0, redact=False, external_usage=0):
+              reserve=0.2, max_wait_s=20.0, redact=False, external_usage=0,
+              private_notes=False):
         app = create_app(rate_limit_per_min=server_limit, fail_first_n=fail_first_n,
                          external_usage=external_usage, clock=clock)
         creds = Credentials(base_url="http://testserver", api_key=api_key)
         rl = RateLimiter(limit_per_min=client_limit or 50, reserve_fraction=reserve, clock=clock)
         client = FreshdeskClient(creds, rate_limiter=rl, max_wait_s=max_wait_s,
                                  transport=httpx.ASGITransport(app=app), sleep=clock.sleep)
-        svc = FreshdeskService(client, Normalizer(redact_pii=redact))
+        svc = FreshdeskService(client, Normalizer(redact_pii=redact, include_private_notes=private_notes))
         svc.mock_state = app.state.mock
         created.append(client)
         return svc

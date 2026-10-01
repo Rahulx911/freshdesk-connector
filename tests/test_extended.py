@@ -13,9 +13,10 @@ import time
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from freshdesk_connector import mcp_server
-from freshdesk_connector.errors import RateLimited
+from freshdesk_connector.errors import InvalidRequest, RateLimited
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,7 +41,7 @@ async def test_api_key_never_logged_or_returned(make_service, caplog):
                 await mcp_server.mcp.call_tool("get_ticket", {"ticket_id": 1}),
                 await mcp_server.mcp.call_tool("customer_ticket_history", {"email": "asha.verma@example.com"}),
             ]
-            with pytest.raises(Exception):
+            with pytest.raises(ToolError):
                 await mcp_server.mcp.call_tool("get_ticket", {"ticket_id": 999999})
     finally:
         mcp_server.set_service(None)
@@ -52,7 +53,7 @@ async def test_injection_and_garbage_inputs_never_reach_freshdesk(make_service):
     svc = make_service()
     before = svc.mock_state["requests"]
     for bad in ["x' OR status:5", "a\" AND priority:4", "<script>", "tag)OR(1", "' OR ''='"]:
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidRequest):
             await svc.search_tickets(tags=[bad])
     assert svc.mock_state["requests"] - before <= 1   # at most the one-off ticket_fields load
 

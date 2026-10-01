@@ -3,7 +3,7 @@ import stat
 
 import pytest
 
-from freshdesk_connector.auth import CredentialStore, Credentials, normalize_base_url, resolve_credentials
+from freshdesk_connector.auth import Credentials, CredentialStore, normalize_base_url, resolve_credentials
 from freshdesk_connector.errors import AuthError, ConfigError
 
 
@@ -18,7 +18,10 @@ def test_normalize_base_url(inp, out):
     assert normalize_base_url(inp) == out
 
 
-@pytest.mark.parametrize("bad", ["", "http://evil.example.com", "acme freshdesk", "../etc"])
+@pytest.mark.parametrize("bad", ["", "http://evil.example.com", "acme freshdesk", "../etc",
+                                 "https://10.0.0.5", "https://169.254.169.254", "https://redis.svc.cluster.local",
+                                 "https://metadata.internal", "https://acme.freshdesk.com/api/v2", "http://mock-freshdesk:8765",
+                                 "https://[::1]"])
 def test_normalize_rejects_bad_domains(bad):
     with pytest.raises(ConfigError):
         normalize_base_url(bad)
@@ -65,3 +68,10 @@ async def test_valid_key_whoami(make_service):
     assert status["connected"] and status["access"] == "read-only"
     assert status["authenticated_as"]["name"] == "Demo Support Agent"
     assert "api_key" not in str(status)
+
+
+def test_insecure_http_host_is_opt_in(monkeypatch):
+    monkeypatch.setenv("FRESHDESK_INSECURE_HTTP_HOSTS", "mock-freshdesk")
+    assert normalize_base_url("http://mock-freshdesk:8765") == "http://mock-freshdesk:8765"
+    with pytest.raises(ConfigError):
+        normalize_base_url("http://other-host:8765")

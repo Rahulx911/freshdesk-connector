@@ -17,7 +17,8 @@ async def test_list_pagination(make_service):
     p1 = await svc.list_tickets(updated_since="2000-01-01T00:00:00Z", per_page=10)
     assert p1["count"] == 10 and p1["has_more"] and p1["next_page"] == 2
     p4 = await svc.list_tickets(updated_since="2000-01-01T00:00:00Z", per_page=10, page=4)
-    assert p4["count"] == 6 and not p4["has_more"]
+    from mock_server.data import TICKETS
+    assert p4["count"] == len(TICKETS) - 30 and not p4["has_more"]
     ids = {t["id"] for t in p1["items"]} & {t["id"] for t in p4["items"]}
     assert not ids
 
@@ -75,7 +76,14 @@ async def test_get_ticket_full(make_service):
     assert t["id"] == 1 and "<p>" not in t["description"] and "KL-10200" in t["description"]
     assert t["requester"]["email"] == "asha.verma@example.com"
     assert t["conversations"][0]["from"] == "agent"
-    assert any(c["private_note"] for c in t["conversations"])  # ticket 1 has an internal note
+    # ticket 1 has an internal note: withheld by default (customer-facing agents) ...
+    assert not any(c["private_note"] for c in t["conversations"])
+    assert t["private_notes_withheld"] == 1
+
+
+async def test_private_notes_opt_in(make_service):
+    t = await make_service(private_notes=True).get_ticket(1)
+    assert any(c["private_note"] for c in t["conversations"]) and "private_notes_withheld" not in t
 
 
 async def test_get_ticket_long_thread_truncated(make_service):
@@ -120,7 +128,7 @@ async def test_companies(make_service):
 
 
 async def test_pii_redaction(make_service):
-    svc = make_service(redact=True)
+    svc = make_service(redact=True, private_notes=True)
     t = await svc.get_ticket(1)
     assert t["requester"]["email"].startswith("a***@")
     note = next(c for c in t["conversations"] if c["private_note"])
