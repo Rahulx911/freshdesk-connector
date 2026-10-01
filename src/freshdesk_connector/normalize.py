@@ -54,10 +54,22 @@ def mask_pii(s: str) -> str:
 
 
 class Normalizer:
-    def __init__(self, *, redact_pii: bool = False, max_body_chars: int = 2000):
+    def __init__(self, *, redact_pii: bool = False, max_body_chars: int = 2000,
+                 include_private_notes: bool = False):
         self.redact_pii = redact_pii
         self.max_body_chars = max_body_chars
+        # Private notes are internal agent chatter (escalations, customer phone numbers,
+        # "don't refund this one"). Withheld by default: most Agent Studio agents talk to
+        # end customers. Internal copilots opt in.
+        self.include_private_notes = include_private_notes
         self.status_names: dict[int, str] = dict(STATUS)
+
+    @staticmethod
+    def _flag_untrusted(out: dict, *texts: str | None) -> None:
+        from . import guardrails
+        if any(guardrails.looks_like_injection(t) for t in texts):
+            out["content_flags"] = [guardrails.INJECTION_FLAG]
+            guardrails.note("prompt_injection_flagged")
 
     def _pii(self, v: Any) -> Any:
         if self.redact_pii and isinstance(v, str):
@@ -78,8 +90,8 @@ class Normalizer:
             "id": t.get("id"),
             "subject": t.get("subject"),
             "status": self._status(t.get("status")),
-            "priority": PRIORITY.get(t.get("priority"), t.get("priority")),
-            "source": SOURCE.get(t.get("source"), t.get("source")),
+            "priority": PRIORITY.get(t.get("priority") or 0, t.get("priority")),
+            "source": SOURCE.get(t.get("source") or 0, t.get("source")),
             "type": t.get("type"),
             "tags": t.get("tags") or [],
             "requester_id": t.get("requester_id"),
@@ -97,6 +109,7 @@ class Normalizer:
         if include_body or "description_text" in t or "description" in t:
             if t.get("description_text") or t.get("description"):
                 out["description"] = self._body(t.get("description_text"), t.get("description"))
+        self._flag_untrusted(out, t.get("subject"), t.get("description_text") or html_to_text(t.get("description")))
         if isinstance(t.get("requester"), dict):
             out["requester"] = self.contact(t["requester"])
         if isinstance(t.get("stats"), dict):
@@ -105,8 +118,22 @@ class Normalizer:
                             ("first_responded_at", "agent_responded_at", "requester_responded_at",
                              "resolved_at", "closed_at") if s.get(k)}
         if isinstance(t.get("conversations"), list):
-            out["conversations"] = [self.conversation(c) for c in t["conversations"]]
+            convs, _ = self.conversations(t["conversations"])
+            out["conversations"] = convs
         return {k: v for k, v in out.items() if v not in (None, [], {})}
+
+    def conversations(self, convs: list[dict]) -> tuple[list[dict], int]:
+        """Normalise a thread, applying the private-note policy. Returns (kept, withheld_count)."""
+        from . import guardrails
+        kept, withheld = [], 0
+        for c in convs:
+            if c.get("private") and not self.include_private_notes:
+                withheld += 1
+                continue
+            kept.append(self.conversation(c))
+        if withheld:
+            guardrails.note("private_notes_withheld")
+        return kept, withheld
 
     def conversation(self, c: dict) -> dict:
         out = {
@@ -117,6 +144,8 @@ class Normalizer:
             "created_at": c.get("created_at"),
             "body": self._body(c.get("body_text"), c.get("body")),
         }
+        if c.get("incoming"):          # only customer-authored text is untrusted
+            self._flag_untrusted(out, c.get("body_text") or html_to_text(c.get("body")))
         if c.get("attachments"):
             out["attachments"] = [
                 {"name": a.get("name"), "content_type": a.get("content_type"), "size": a.get("size")}

@@ -6,13 +6,14 @@ import argparse
 import asyncio
 import getpass
 import json
-import logging
 import os
 import sys
 
-from .auth import CredentialStore, Credentials, normalize_base_url, resolve_credentials
+from .auth import Credentials, CredentialStore, normalize_base_url, resolve_credentials
 from .client import FreshdeskClient
 from .errors import FreshdeskError
+from .observability import configure_logging
+from .tenancy import TenantRegistry, hash_token, mint_token
 
 
 async def _verify(creds: Credentials) -> Credentials:
@@ -61,11 +62,43 @@ def cmd_logout(_: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    from .mcp_server import mcp, run
-    if args.transport != "stdio":
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-    run(args.transport)
+    from . import mcp_server as ms
+
+    if args.transport == "stdio":
+        if args.tenants:
+            print("--tenants needs an HTTP transport (stdio is single-merchant)", file=sys.stderr)
+            return 2
+        ms.mcp.run(transport="stdio")
+        return 0
+
+    registry = None
+    tenants = args.tenants or os.environ.get("FRESHDESK_TENANTS_FILE")
+    if tenants:
+        try:
+            registry = TenantRegistry.load(tenants)
+        except FreshdeskError as e:
+            print(f"Cannot start: {e.message}", file=sys.stderr)
+            return 2
+    elif args.host not in ("127.0.0.1", "localhost") and not args.allow_unauthenticated:
+        print("Refusing to serve HTTP on a non-local interface without --tenants (bearer-token "
+              "auth). Pass --allow-unauthenticated only behind a trusted gateway.", file=sys.stderr)
+        return 2
+    ms.configure(ms.ServiceProvider(ms.Settings.from_env(), registry))
+    allowed = [h for h in (args.allowed_hosts or os.environ.get("MCP_ALLOWED_HOSTS", "")).split(",") if h]
+    server = ms.build_server(registry=registry, public_url=args.public_url or os.environ.get("MCP_PUBLIC_URL"),
+                             stateless=args.transport == "streamable-http", host=args.host,
+                             port=args.port, allowed_hosts=allowed or None)
+    server.run(transport=args.transport)
+    return 0
+
+
+def cmd_token_create(args: argparse.Namespace) -> int:
+    token = mint_token()
+    entry = {"name": args.name, "tenant": args.tenant, "sha256": hash_token(token)}
+    print("Bearer token (shown once; store it in Agent Studio's secret store):", file=sys.stderr)
+    print(token)
+    print("\nAdd this entry to the \"tokens\" list in your tenant registry:", file=sys.stderr)
+    print(json.dumps(entry), file=sys.stderr)
     return 0
 
 
@@ -91,8 +124,7 @@ def cmd_export_spec(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "WARNING"), stream=sys.stderr,
-                        format="%(levelname)s %(name)s: %(message)s")
+    configure_logging(os.environ.get("LOG_LEVEL", "WARNING"), os.environ.get("LOG_FORMAT", "text"))
     p = argparse.ArgumentParser(prog="freshdesk-connector")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -110,7 +142,19 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--transport", choices=["stdio", "streamable-http", "sse"], default="stdio")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--tenants", help="tenant registry JSON (enables bearer-token auth, multi-merchant)")
+    serve.add_argument("--public-url", help="externally visible base URL (for OAuth resource metadata)")
+    serve.add_argument("--allowed-hosts", help="comma-separated Host headers to accept (DNS-rebinding protection)")
+    serve.add_argument("--allow-unauthenticated", action="store_true",
+                       help="serve HTTP on a non-local interface without auth (behind a trusted gateway only)")
     serve.set_defaults(func=cmd_serve)
+
+    tok = sub.add_parser("token", help="manage bearer tokens for hosted mode")
+    tsub = tok.add_subparsers(dest="token_cmd", required=True)
+    tc = tsub.add_parser("create", help="mint a token bound to one tenant")
+    tc.add_argument("--tenant", required=True)
+    tc.add_argument("--name", required=True, help="label, e.g. agent-studio-acme-prod")
+    tc.set_defaults(func=cmd_token_create)
 
     spec = sub.add_parser("export-spec", help="print MCP tool specification JSON")
     spec.add_argument("-o", "--output")
