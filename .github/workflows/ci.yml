@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]" pytest-cov
+      - name: Unit, conformance and integration tests
+        run: pytest -q --cov=freshdesk_connector --cov-report=term
+      - name: End-to-end MCP demo against mock Freshdesk
+        run: python scripts/demo.py
