@@ -32,8 +32,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,7 @@ from .auth import Credentials, normalize_base_url
 from .errors import ConfigError
 
 SCOPE = "freshdesk:read"
+log = logging.getLogger("freshdesk_connector")
 
 
 def hash_token(token: str) -> str:
@@ -127,11 +130,56 @@ class TenantRegistry:
         return found
 
 
+class RegistryWatcher:
+    """Serves the current registry and re-reads the file when it changes (checked at most
+    every `interval_s`), so revoking a token or onboarding a merchant needs no redeploy:
+    edit the file (e.g. a ConfigMap update) and the change applies within seconds.
+    A broken edit never takes the service down: the last good registry stays active."""
+
+    def __init__(self, path: str | os.PathLike, interval_s: float = 5.0, clock: Any = time.monotonic):
+        self.path = Path(path)
+        self.interval_s = interval_s
+        self.clock = clock
+        self._registry = TenantRegistry.load(self.path)     # fail fast at startup
+        self._mtime = self._stat()
+        self._next_check = clock() + interval_s
+        self.reloads = 0
+        self.last_error: str | None = None
+
+    def _stat(self) -> float:
+        try:
+            return self.path.stat().st_mtime_ns
+        except OSError:
+            return -1
+
+    def current(self) -> TenantRegistry:
+        now = self.clock()
+        if now >= self._next_check:
+            self._next_check = now + self.interval_s
+            mtime = self._stat()
+            if mtime != self._mtime:
+                try:
+                    self._registry = TenantRegistry.load(self.path)
+                    self._mtime = mtime
+                    self.reloads += 1
+                    self.last_error = None
+                    log.info("tenant registry reloaded", extra={"event": {
+                        "tenants": len(self._registry.tenants), "tokens": len(self._registry.token_hashes)}})
+                except ConfigError as e:
+                    self.last_error = str(e)
+                    log.error("tenant registry reload failed; keeping previous version: %s", e)
+        return self._registry
+
+
 class RegistryTokenVerifier:
     """MCP TokenVerifier: bearer token -> AccessToken whose client_id is the tenant."""
 
-    def __init__(self, registry: TenantRegistry):
-        self.registry = registry
+    def __init__(self, registry: TenantRegistry | RegistryWatcher):
+        self.source = registry
+
+    @property
+    def registry(self) -> TenantRegistry:
+        return self.source.current() if isinstance(self.source, RegistryWatcher) else self.source
 
     async def verify_token(self, token: str) -> AccessToken | None:
         tenant = self.registry.tenant_for_token(token)

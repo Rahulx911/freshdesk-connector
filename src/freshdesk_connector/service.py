@@ -6,10 +6,12 @@ whether it has the full picture."""
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 from .client import FreshdeskClient
-from .errors import FreshdeskError, InvalidRequest, NotFound
+from .errors import AuthError, InvalidRequest, NotFound, PermissionDenied, RateLimited, UpstreamError
 from .normalize import STATUS, Normalizer, slugify
 from .query import build_ticket_query, iso_or_none
 
@@ -35,30 +37,58 @@ def _paged(items: list, page: int, has_more: bool, **extra: Any) -> dict:
     return out
 
 
+def _human_hours(h: float) -> str:
+    h = abs(h)
+    if h >= 48:
+        return f"{round(h / 24)} days"
+    if h >= 1:
+        return f"{round(h)}h"
+    return f"{max(1, round(h * 60))} min"
+
+
 class FreshdeskService:
-    def __init__(self, client: FreshdeskClient, normalizer: Normalizer | None = None):
+    STATUS_TTL_S = 3600          # admins add/rename statuses; pick changes up hourly
+
+    def __init__(self, client: FreshdeskClient, normalizer: Normalizer | None = None,
+                 clock: Any = time.monotonic):
         self.c = client
         self.n = normalizer or Normalizer()
-        self._statuses_loaded = False
+        self._clock = clock
+        self._statuses_until = 0.0
+        self._statuses_lock = asyncio.Lock()
 
     async def statuses(self) -> dict[int, str]:
-        """The account's ticket statuses, including custom ones, read once from
-        /api/v2/ticket_fields. Falls back to the built-in 2-5 if the key can't read fields."""
-        if not self._statuses_loaded:
+        """The account's ticket statuses, including custom ones, from /api/v2/ticket_fields.
+
+        Cached for STATUS_TTL_S; concurrent first calls share one fetch. If the key may
+        not read ticket fields (403/404) we settle on the built-in 2-5 for the TTL. A
+        *transient* failure (rate limit, Freshdesk down) is not cached: this call uses
+        whatever we already know and the next call retries. Auth failures propagate."""
+        if self._clock() < self._statuses_until:
+            return self.n.status_names
+        async with self._statuses_lock:
+            if self._clock() < self._statuses_until:          # another task just refreshed
+                return self.n.status_names
             try:
                 fields = await self.c.get_json("/api/v2/ticket_fields")
-                for f in fields:
-                    if f.get("type") == "default_status" and isinstance(f.get("choices"), dict):
-                        names: dict[int, str] = {}
-                        for sid, labels in f["choices"].items():
-                            label = labels[0] if isinstance(labels, list) and labels else str(labels)
-                            names[int(sid)] = slugify(label)
-                        if names:
-                            self.n.status_names = names
-            except FreshdeskError:
+            except AuthError:
+                raise
+            except (PermissionDenied, NotFound):
                 self.n.status_names = dict(STATUS)
-            self._statuses_loaded = True
-        return self.n.status_names
+                self._statuses_until = self._clock() + self.STATUS_TTL_S
+                return self.n.status_names
+            except (RateLimited, UpstreamError):
+                return self.n.status_names
+            for f in fields if isinstance(fields, list) else []:
+                if f.get("type") == "default_status" and isinstance(f.get("choices"), dict):
+                    names: dict[int, str] = {}
+                    for sid, labels in f["choices"].items():
+                        label = labels[0] if isinstance(labels, list) and labels else str(labels)
+                        names[int(sid)] = slugify(label)
+                    if names:
+                        self.n.status_names = names
+            self._statuses_until = self._clock() + self.STATUS_TTL_S
+            return self.n.status_names
 
     # ---------------------------------------------------------------- tickets
     async def list_tickets(
@@ -129,6 +159,17 @@ class FreshdeskService:
             out["conversations_truncated"] = convs["has_more"]
             if convs.get("private_notes_withheld"):
                 out["private_notes_withheld"] = convs["private_notes_withheld"]
+            # fold references found anywhere in the visible thread into the ticket's signals
+            refs = list(out.get("signals", {}).get("payment_refs", []))
+            for c in convs["items"]:
+                refs.extend(c.get("payment_refs", []))
+            if refs:
+                seen, merged = set(), []
+                for r in refs:
+                    if (r["type"], r["value"]) not in seen:
+                        seen.add((r["type"], r["value"]))
+                        merged.append(r)
+                out.setdefault("signals", {})["payment_refs"] = merged
         return out
 
     async def list_ticket_conversations(self, ticket_id: int, *, page: int = 1, per_page: int = 30) -> dict:
@@ -218,6 +259,105 @@ class FreshdeskService:
         comps = data.get("companies", data) if isinstance(data, dict) else data
         items = [{"id": c.get("id"), "name": c.get("name")} for c in comps[:limit]]
         return {"items": items, "count": len(items)}
+
+    # ------------------------------------------------------------------ pulse
+    async def support_pulse(self, *, max_tickets: int = 90, top: int = 10) -> dict:
+        """What should the support team look at right now?
+
+        Pulls the active backlog (every status except resolved/closed, custom ones
+        included) through search, then scores each ticket with explainable reasons:
+        SLA overdue/due soon, urgent/high priority, escalated, payment-related (needs a
+        Razorpay lookup), unassigned. Costs at most ceil(max_tickets/30) API credits."""
+        if not 30 <= max_tickets <= SEARCH_PAGE_SIZE * SEARCH_MAX_PAGE:
+            raise InvalidRequest(f"max_tickets must be between 30 and {SEARCH_PAGE_SIZE * SEARCH_MAX_PAGE}")
+        if not 1 <= top <= 25:
+            raise InvalidRequest("top must be between 1 and 25")
+        names = await self.statuses()
+        active = sorted(n for n in names.values() if n not in ("resolved", "closed"))
+        tickets: list[dict] = []
+        total = 0
+        for page in range(1, -(-max_tickets // SEARCH_PAGE_SIZE) + 1):
+            res = await self.search_tickets(status=active, page=page)
+            total = res["total_matches"]
+            tickets.extend(res["items"])
+            if not res["has_more"]:
+                break
+        tickets = tickets[:max_tickets]
+
+        def bump(d: dict[str, int], k: Any) -> None:
+            d[str(k)] = d.get(str(k), 0) + 1
+
+        by_intent: dict[str, int] = {}
+        by_priority: dict[str, int] = {}
+        by_status: dict[str, int] = {}
+        scored = []
+        for t in tickets:
+            sig = t.get("signals", {})
+            bump(by_intent, sig.get("intent", "other"))
+            bump(by_priority, t.get("priority"))
+            bump(by_status, t.get("status"))
+            score, why = 0, []
+            sla = sig.get("sla") or {}
+            overdue_h = 0.0
+            if sla.get("state") == "overdue":
+                score += 50
+                overdue_h = abs(sla["resolution_due_in_hours"])
+                why.append(f"SLA overdue by {_human_hours(overdue_h)}")
+            elif sla.get("state") == "due_soon":
+                score += 25
+                why.append(f"SLA due in {_human_hours(sla['resolution_due_in_hours'])}")
+            if sla.get("first_response_overdue"):
+                score += 20
+                why.append("no first response yet (overdue)")
+            if t.get("priority") == "urgent":
+                score += 25
+                why.append("urgent")
+            elif t.get("priority") == "high":
+                score += 10
+                why.append("high priority")
+            if t.get("is_escalated"):
+                score += 15
+                why.append("escalated")
+            if sig.get("payment_related"):
+                score += 15
+                why.append(f"payment issue ({sig.get('intent')})" +
+                           (" with Razorpay refs" if sig.get("payment_refs") else ""))
+            if not t.get("responder_id"):
+                score += 10
+                why.append("unassigned")
+            if t.get("content_flags"):
+                score += 5
+                why.append("possible prompt injection: human review")
+            scored.append((score, overdue_h, t, why))
+        # highest score first; among equals, the longest-overdue ticket first
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        attention = [{"id": t["id"], "subject": t.get("subject"), "status": t.get("status"),
+                      "priority": t.get("priority"), "intent": t.get("signals", {}).get("intent"),
+                      "score": sc, "why": why, **({"source_url": t["source_url"]} if t.get("source_url") else {})}
+                     for sc, _, t, why in scored[:top] if sc > 0]
+        payment = [{"id": t["id"], "intent": t["signals"].get("intent"),
+                    "payment_refs": t["signals"].get("payment_refs", [])}
+                   for t in tickets if t.get("signals", {}).get("payment_related")]
+        overdue = sum(1 for t in tickets if (t.get("signals", {}).get("sla") or {}).get("state") == "overdue")
+        due_soon = sum(1 for t in tickets if (t.get("signals", {}).get("sla") or {}).get("state") == "due_soon")
+        return {
+            "active_backlog": total,
+            "analysed": len(tickets),
+            "complete": len(tickets) >= total,
+            "active_statuses": active,
+            "overdue": overdue,
+            "due_soon": due_soon,
+            "unassigned": sum(1 for t in tickets if not t.get("responder_id")),
+            "payment_related": len(payment),
+            "by_intent": dict(sorted(by_intent.items(), key=lambda kv: -kv[1])),
+            "by_priority": by_priority,
+            "by_status": by_status,
+            "needs_attention": attention,
+            "payment_tickets": payment[:25],
+            "note": ("Signals here come from what search returns (Freshdesk search may omit ticket "
+                     "bodies); get_ticket gives the full picture. Pass payment_refs to Razorpay tools "
+                     "to answer refund/payment questions from the source of truth."),
+        }
 
     # ------------------------------------------------------------------- meta
     async def connector_status(self) -> dict:

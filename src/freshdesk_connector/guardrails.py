@@ -62,17 +62,23 @@ def fit_to_budget(result: Any, max_chars: int) -> tuple[Any, bool]:
     clipping long strings. Marks what was cut so the model knows to page."""
     if max_chars <= 0 or not isinstance(result, dict) or _size(result) <= max_chars:
         return result, False
+    target = max(0, max_chars - 120)          # room for the truncation markers added below
     out = dict(result)
     for key in ("conversations", "items", "tickets"):
         lst = out.get(key)
         if isinstance(lst, list) and lst:
-            dropped = 0
-            while lst and _size(out) > max_chars:
-                lst = lst[:-1]
-                out[key] = lst
-                dropped += 1
-            if dropped:
-                out[f"{key}_omitted_for_size"] = dropped
+            # binary search for the longest prefix that fits: O(log n) serialisations
+            lo, hi = 0, len(lst)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                out[key] = lst[:mid]
+                if _size(out) <= target:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            out[key] = lst[:lo]
+            if lo < len(lst):
+                out[f"{key}_omitted_for_size"] = len(lst) - lo
         if _size(out) <= max_chars:
             break
     if _size(out) > max_chars:
