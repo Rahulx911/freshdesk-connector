@@ -6,7 +6,7 @@
   "tools": [
     {
       "name": "list_orders",
-      "description": "List recent orders, newest first.\n\nUse this only to browse. If you know anything about what you are\nlooking for (a status, a date range, a customer, a product), use\n`search_orders` instead so the store does less work.\n\nstatus: any of pending, processing, on-hold, completed, cancelled,\nrefunded, failed, or \"any\". Dates are YYYY-MM-DD or full ISO 8601.\n",
+      "description": "List recent orders, newest first.\n\nUse this only to browse. If you know anything about what you are\nlooking for (a status, a date range, a customer, a product), use\n`search_orders` instead so the store does less work.\n\nstatus: any of pending, processing, on-hold, completed, cancelled,\nrefunded, failed, or \"any\". Dates are YYYY-MM-DD or full ISO 8601.",
       "input_schema": {
         "properties": {
           "status": {
@@ -84,7 +84,7 @@
     },
     {
       "name": "search_orders",
-      "description": "Find orders by status, free text, date range, customer or product.\n\n`search` matches the order number, billing name and billing email, so\nit is the right tool when a customer gives you an email address or an\norder number. Prefer narrow filters: each page is a live request\nagainst the merchant's shop.\n",
+      "description": "Find orders by status, free text, date range, customer or product.\n\n`search` matches the order number, billing name and billing email, so\nit is the right tool when a customer gives you an email address or an\norder number. Prefer narrow filters: each page is a live request\nagainst the merchant's shop.",
       "input_schema": {
         "properties": {
           "status": {
@@ -234,7 +234,7 @@
     },
     {
       "name": "get_order",
-      "description": "Get one order in full, with line items, refund rows and signals.\n\nRead `signals.reconciliation` before answering any refund question.\nA refund row in WooCommerce only proves a shop manager clicked\nrefund; the Razorpay `rfnd_` id is what proves the money moved.\n",
+      "description": "Get one order in full, with line items, refund rows and signals.\n\nRead `signals.reconciliation` before answering any refund question.\nA refund row in WooCommerce only proves a shop manager clicked\nrefund; the Razorpay `rfnd_` id is what proves the money moved.",
       "input_schema": {
         "properties": {
           "order_id": {
@@ -261,7 +261,7 @@
     },
     {
       "name": "list_order_refunds",
-      "description": "List the refund rows recorded against one order.\n\nThese are WooCommerce's own records. Cross-check the Razorpay refund\nids in the order's `signals.payment_refs.refund_id` before telling a\ncustomer a refund has been sent.\n",
+      "description": "List the refund rows recorded against one order.\n\nThese are WooCommerce's own records. Cross-check the Razorpay refund\nids in the order's `signals.payment_refs.refund_id` before telling a\ncustomer a refund has been sent.",
       "input_schema": {
         "properties": {
           "order_id": {
@@ -307,7 +307,7 @@
     },
     {
       "name": "list_products",
-      "description": "Find products by name, SKU, stock status or publication status.\n\nstock_status is one of instock, outofstock, onbackorder. Useful for\n\"is this back in stock yet?\" without guessing from order data.\n",
+      "description": "Find products by name, SKU, stock status or publication status.\n\nstock_status is one of instock, outofstock, onbackorder. Useful for\n\"is this back in stock yet?\" without guessing from order data.",
       "input_schema": {
         "properties": {
           "status": {
@@ -421,7 +421,7 @@
     },
     {
       "name": "get_product",
-      "description": "Get one product: price, sale price, stock level, SKU and a short\ndescription.\n\nUse this to confirm availability or pricing before answering a\ncustomer. Stock figures are whatever the store currently reports and\ncan move between this call and the customer reading your reply.\n",
+      "description": "Get one product: price, sale price, stock level, SKU and a short\ndescription.\n\nUse this to confirm availability or pricing before answering a\ncustomer. Stock figures are whatever the store currently reports and\ncan move between this call and the customer reading your reply.",
       "input_schema": {
         "properties": {
           "product_id": {
@@ -443,7 +443,7 @@
     },
     {
       "name": "find_customers",
-      "description": "Find customer accounts by name or email.\n\nOnly matches registered accounts. A guest checkout has no customer\nrecord, so if this returns nothing use `customer_order_history` with\nthe email, which falls back to searching orders.\n",
+      "description": "Find customer accounts by name or email.\n\nOnly matches registered accounts. A guest checkout has no customer\nrecord, so if this returns nothing use `customer_order_history` with\nthe email, which falls back to searching orders.",
       "input_schema": {
         "properties": {
           "search": {
@@ -528,7 +528,7 @@
     },
     {
       "name": "customer_order_history",
-      "description": "Everything this connector knows about one customer's orders.\n\nPass a customer_id or an email. Handles guest checkouts: if no\naccount matches the email, it searches orders by billing details\ninstead and says so in `matched_by`. This is the right first call for\n\"where is my order\" and \"where is my refund\".\n",
+      "description": "Everything this connector knows about one customer's orders.\n\nPass a customer_id or an email. Handles guest checkouts: if no\naccount matches the email, it searches orders by billing details\ninstead and says so in `matched_by`. This is the right first call for\n\"where is my order\" and \"where is my refund\".",
       "input_schema": {
         "properties": {
           "customer_id": {
@@ -572,7 +572,7 @@
     },
     {
       "name": "store_pulse",
-      "description": "What needs attention in the store right now, ranked with reasons.\n\nOne call returns the recent order mix by payment state, intent and\ngateway, plus a ranked `needs_attention` list. Each entry carries\n`why`, the plain-language reasons behind its rank, so the merchant\ncan audit the ordering.\n\n`refunds_not_confirmed_at_gateway` is the list worth reading first:\nthose are refunds WooCommerce believes are done but that carry no\nRazorpay refund id.\n",
+      "description": "What needs attention in the store right now, ranked with reasons.\n\nOne call returns the recent order mix by payment state, intent and\ngateway, plus a ranked `needs_attention` list. Each entry carries\n`why`, the plain-language reasons behind its rank, so the merchant\ncan audit the ordering.\n\n`refunds_not_confirmed_at_gateway` is the list worth reading first:\nthose are refunds WooCommerce believes are done but that carry no\nRazorpay refund id.",
       "input_schema": {
         "properties": {
           "days": {
@@ -602,7 +602,7 @@
     },
     {
       "name": "connector_status",
-      "description": "Check the connection, the key's visibility and the rate budget.\n\nCall this first if another tool failed with auth_failed or\nrate_limited, and tell the user what it reports rather than retrying.\n",
+      "description": "Check the connection, the key's visibility and the rate budget.\n\nCall this first if another tool failed with auth_failed or\nrate_limited, and tell the user what it reports rather than retrying.",
       "input_schema": {
         "properties": {},
         "title": "connector_statusArguments",
