@@ -1,13 +1,11 @@
-"""End-to-end demo over the real MCP protocol.
+#!/usr/bin/env python3
+"""End-to-end demo: drive the connector over MCP exactly as an agent would.
 
-Spawns the connector as an MCP stdio server (exactly how an agent runtime
-would), then calls every tool the way an agent would and prints compact
-results, including the failure cases (bad id, bad filter, bad key).
+    python scripts/demo.py           # starts the bundled mock WooCommerce
+    python scripts/demo.py --live    # uses WOO_STORE_URL / WOO_CONSUMER_KEY /
+                                     # WOO_CONSUMER_SECRET
 
-    python scripts/demo.py              # starts the bundled mock Freshdesk
-    python scripts/demo.py --live       # uses FRESHDESK_DOMAIN / FRESHDESK_API_KEY
-
-In --live mode it is still read-only: nothing in your helpdesk changes.
+In --live mode it is still read-only: nothing in the store changes.
 """
 
 from __future__ import annotations
@@ -27,181 +25,185 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 ROOT = Path(__file__).resolve().parent.parent
-MOCK_KEY = "mock-api-key-123"
+sys.path.insert(0, str(ROOT))
 
 GREEN, RED, DIM, BOLD, RESET = "\033[32m", "\033[31m", "\033[2m", "\033[1m", "\033[0m"
 if not sys.stdout.isatty():
     GREEN = RED = DIM = BOLD = RESET = ""
 
+checks: list[tuple[str, bool]] = []
 
-def _free_port() -> int:
+
+def check(label: str, ok: bool) -> None:
+    checks.append((label, bool(ok)))
+    mark = f"{GREEN}ok{RESET}" if ok else f"{RED}FAIL{RESET}"
+    print(f"    [{mark}] {label}")
+
+
+def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        return int(s.getsockname()[1])
 
 
 @contextmanager
-def mock_freshdesk(rate_limit: int):
-    port = _free_port()
-    env = {**os.environ, "MOCK_RATE_LIMIT": str(rate_limit)}
+def mock_store():
+    port = free_port()
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "mock_server.app:app", "--port", str(port), "--log-level", "warning"],
-        cwd=ROOT, env=env,
+        [sys.executable, "-m", "uvicorn", "mock_server.app:app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "error"],
+        cwd=ROOT,
     )
+    base = f"http://127.0.0.1:{port}"
     try:
-        for _ in range(50):
+        for _ in range(100):
             try:
-                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
-                break
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    break
             except OSError:
                 time.sleep(0.1)
-        yield f"http://127.0.0.1:{port}"
+        yield base
     finally:
         proc.terminate()
-        proc.wait(timeout=5)
+        proc.wait(timeout=10)
 
 
-def _short(obj, limit=600) -> str:
-    s = json.dumps(obj, ensure_ascii=False)
-    return s if len(s) <= limit else s[:limit] + f"… ({len(s)} chars)"
-
-
-async def call(session: ClientSession, name: str, args: dict, *, expect_error: bool = False) -> dict | None:
-    res = await session.call_tool(name, args)
-    text = res.content[0].text if res.content else ""
-    ok = res.isError == expect_error
-    mark = f"{GREEN}PASS{RESET}" if ok else f"{RED}FAIL{RESET}"
-    print(f"\n[{mark}] {BOLD}{name}{RESET}({_short(args, 200)})"
-          f"{'  (expected error)' if expect_error else ''}")
+async def call(session: ClientSession, tool: str, args: dict) -> dict | None:
+    result = await session.call_tool(tool, args)
+    text = result.content[0].text if result.content else "{}"
     try:
-        payload = res.structuredContent or json.loads(text)
-    except (ValueError, TypeError):
-        payload = text
-    if isinstance(payload, dict) and "result" in payload and len(payload) == 1:
-        payload = payload["result"]
-    print(f"{DIM}  → {_short(payload)}{RESET}")
-    call.results.append(ok)
-    return payload if isinstance(payload, dict) else None
+        payload = json.loads(text)
+    except ValueError:
+        print(f"    {RED}{tool}: non-JSON response{RESET}")
+        return None
+    if isinstance(payload, dict) and payload.get("error"):
+        print(f"    {DIM}{tool} -> {payload['error']}: {payload['message']}{RESET}")
+        return payload
+    return payload
 
 
-call.results = []
-
-
-async def run_session(base_url: str, api_key: str, *, live: bool) -> None:
-    env = {**os.environ, "LOG_LEVEL": "ERROR", "AUDIT_LOG": "off", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": api_key,
-           "FRESHDESK_MAX_WAIT_S": "5"}
-    params = StdioServerParameters(command=sys.executable,
-                                   args=["-m", "freshdesk_connector.cli", "serve"], env=env)
+async def run(store_url: str, key: str, secret: str, *, live: bool) -> None:
+    env = {
+        **os.environ,
+        "LOG_LEVEL": "ERROR", "AUDIT_LOG": "off",
+        "WOO_STORE_URL": store_url, "WOO_CONSUMER_KEY": key, "WOO_CONSUMER_SECRET": secret,
+    }
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "woocommerce_connector.cli", "serve"], env=env
+    )
     async with stdio_client(params) as (r, w), ClientSession(r, w) as session:
         init = await session.initialize()
         tools = await session.list_tools()
-        print(f"{BOLD}Connected to MCP server '{init.serverInfo.name}' — {len(tools.tools)} tools:{RESET} "
-              + ", ".join(t.name for t in tools.tools))
+        print(f"{BOLD}Connected to '{init.serverInfo.name}' with {len(tools.tools)} tools{RESET}")
+        print(f"{DIM}{', '.join(t.name for t in tools.tools)}{RESET}\n")
+        check("11 read-only tools exposed", len(tools.tools) == 11)
 
-        print(f"\n{BOLD}== Auth / status{RESET}")
-        await call(session, "connector_status", {})
+        print(f"\n{BOLD}== Connection{RESET}")
+        status = await call(session, "connector_status", {})
+        check("connector reports connected", bool(status and status.get("connected")))
+        check("read-only mode advertised", "read-only" in (status or {}).get("mode", ""))
+        check("rate budget reported", bool((status or {}).get("rate_budget")))
 
-        print(f"\n{BOLD}== List{RESET}")
-        await call(session, "list_tickets", {"per_page": 5})
-        page1 = await call(session, "list_tickets", {"updated_since": "2000-01-01T00:00:00Z", "per_page": 10})
-        if page1 and page1.get("has_more"):
-            await call(session, "list_tickets", {"updated_since": "2000-01-01T00:00:00Z", "per_page": 10,
-                                                 "page": page1["next_page"]})
+        print(f"\n{BOLD}== Orders{RESET}")
+        page = await call(session, "list_orders", {"per_page": 5})
+        items = (page or {}).get("items", [])
+        check("list_orders returned orders", bool(items))
+        check("pagination metadata present", "total_matching" in (page or {}))
+        check("every order carries signals", all("signals" in o for o in items))
+        check("every order carries a source_url", all("source_url" in o for o in items))
 
-        print(f"\n{BOLD}== Search{RESET}")
-        found = await call(session, "search_tickets", {"status": ["open", "pending"], "priority": ["urgent", "high"]})
-        await call(session, "search_tickets", {"tags": ["refund", "payments"], "created_after": "2000-01-01"})
+        failed = await call(session, "search_orders", {"status": ["failed", "pending"]})
+        check("status filter works", bool((failed or {}).get("items")))
 
-        print(f"\n{BOLD}== Get{RESET}")
-        tid = (found or {}).get("items", [{}])[0].get("id", 1) if found and found.get("items") else 1
-        await call(session, "get_ticket", {"ticket_id": tid, "max_conversations": 5})
+        print(f"\n{BOLD}== Payment signals (the differentiator){RESET}")
+        pulse = await call(session, "store_pulse", {"days": 30})
+        check("store_pulse scanned orders", bool((pulse or {}).get("orders_scanned")))
+        attention = (pulse or {}).get("needs_attention", [])
+        check("needs_attention is ranked", bool(attention))
+        check("every ranked order explains itself", all(e.get("why") for e in attention))
+
+        unconfirmed = (pulse or {}).get("refunds_not_confirmed_at_gateway", [])
         if not live:
-            t5 = await call(session, "get_ticket", {"ticket_id": 5, "max_conversations": 10})
-            if t5 and t5.get("conversations_truncated"):
-                await call(session, "list_ticket_conversations", {"ticket_id": 5, "page": 2, "per_page": 10})
+            check("unconfirmed refund detected", bool(unconfirmed))
+        if attention:
+            top = attention[0]
+            print(f"\n    {BOLD}top of the backlog:{RESET} order {top.get('number')} "
+                  f"(score {top.get('score')})")
+            for reason in top.get("why", []):
+                print(f"      · {reason}")
 
         if not live:
-            print(f"\n{BOLD}== Payment-aware signals (Razorpay refs, intent, SLA) and triage{RESET}")
-            t2 = await call(session, "get_ticket", {"ticket_id": 2, "max_conversations": 5})
-            refs = {r["value"] for r in (t2 or {}).get("signals", {}).get("payment_refs", [])}
-            call.results.append({"pay_KL10201QzXwVuT", "rfnd_KL10201RrSsTtU"} <= refs)
-            print(f"  {GREEN if call.results[-1] else RED}refs found:{RESET} {sorted(refs)}")
-            pulse = await call(session, "support_pulse", {"top": 3})
-            for a in (pulse or {}).get("needs_attention", []):
-                print(f"  #{a['id']} score={a['score']} {a['subject'][:40]!r} <- {', '.join(a['why'])}")
+            detail = await call(session, "get_order", {"order_id": 1102})
+            sig = (detail or {}).get("signals", {})
+            recon = sig.get("reconciliation", {})
+            check("refund without a gateway id is flagged",
+                  recon.get("status") == "refund_not_confirmed_at_gateway")
+            check("the flag explains the risk in words", bool(recon.get("explanation")))
 
-        print(f"\n{BOLD}== Customers & companies{RESET}")
+            double = await call(session, "get_order", {"order_id": 1103})
+            dsig = (double or {}).get("signals", {})
+            check("double charge detected",
+                  dsig.get("reconciliation", {}).get("status") == "multiple_payments")
+            check("Razorpay payment ids extracted",
+                  len(dsig.get("payment_refs", {}).get("payment_id", [])) == 2)
+
+            paid = await call(session, "get_order", {"order_id": 1101})
+            check("signature verification surfaced",
+                  (paid or {}).get("signals", {}).get("payment_refs", {}).get("signature_verified") is True)
+
+        print(f"\n{BOLD}== Customers{RESET}")
         if not live:
-            await call(session, "customer_ticket_history", {"email": "kabir.nair@example.com", "limit": 5})
-            await call(session, "find_contacts", {"phone": "+91 90000 00005"})
-            await call(session, "find_contacts", {"name": "Mee"})
-            await call(session, "get_contact", {"contact_id": 1002})
-            await call(session, "find_companies", {"name": "Br"})
-            await call(session, "get_company", {"company_id": 501})
+            hist = await call(session, "customer_order_history", {"email": "rohit.bansal@example.com"})
+            check("guest checkout resolved by email", (hist or {}).get("matched_by") == "guest_email")
+            check("guest fallback is explained", bool((hist or {}).get("note")))
+            acct = await call(session, "customer_order_history", {"customer_id": 31})
+            check("registered customer history", (acct or {}).get("summary", {}).get("orders") == 2)
 
-        print(f"\n{BOLD}== Failure cases (agent gets a structured error + hint){RESET}")
-        await call(session, "get_ticket", {"ticket_id": 987654}, expect_error=True)
-        await call(session, "search_tickets", {"tags": ["x' OR status:5"]}, expect_error=True)
-        await call(session, "search_tickets", {"status": ["stuck"]}, expect_error=True)
-        await call(session, "find_contacts", {"email": "a@b.co", "name": "x"}, expect_error=True)
+        print(f"\n{BOLD}== Safety{RESET}")
+        if not live:
+            injected = await call(session, "get_order", {"order_id": 1108})
+            check("prompt injection flagged",
+                  "override_instructions" in (injected or {}).get("untrusted_text_flags", []))
+            check("PII masked by default",
+                  "@" in (injected or {}).get("billing", {}).get("email", "")
+                  and "*" in (injected or {}).get("billing", {}).get("email", ""))
 
-
-async def run_bad_key(base_url: str) -> None:
-    print(f"\n{BOLD}== Wrong API key{RESET}")
-    env = {**os.environ, "LOG_LEVEL": "ERROR", "AUDIT_LOG": "off", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": "not-a-real-key"}
-    params = StdioServerParameters(command=sys.executable,
-                                   args=["-m", "freshdesk_connector.cli", "serve"], env=env)
-    async with stdio_client(params) as (r, w), ClientSession(r, w) as session:
-        await session.initialize()
-        await call(session, "connector_status", {}, expect_error=True)
-
-
-async def run_rate_limit(base_url: str, api_key: str) -> None:
-    print(f"\n{BOLD}== Rate limiting (mock account limit 10/min, connector keeps 20% reserve){RESET}")
-    env = {**os.environ, "LOG_LEVEL": "ERROR", "AUDIT_LOG": "off", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": api_key,
-           "FRESHDESK_MAX_WAIT_S": "3"}
-    params = StdioServerParameters(command=sys.executable,
-                                   args=["-m", "freshdesk_connector.cli", "serve"], env=env)
-    async with stdio_client(params) as (r, w), ClientSession(r, w) as session:
-        await session.initialize()
-        for i in range(10):
-            res = await session.call_tool("get_company", {"company_id": 501})
-            if res.isError:
-                body = json.loads(res.content[0].text.split(": ", 1)[-1])
-                print(f"  call {i + 1}: {RED}{body['error']}{RESET} retry_after={body.get('retry_after_seconds')}s "
-                      f"{DIM}hint: {body['hint']}{RESET}")
-                call.results.append(body["error"] == "rate_limited" and i >= 7)
-                break
-            print(f"  call {i + 1}: ok")
-        else:
-            call.results.append(False)
-        status = await session.call_tool("connector_status", {})
-        print(f"{DIM}  status → {status.content[0].text[:300]}{RESET}")
+        print(f"\n{BOLD}== Failure modes{RESET}")
+        missing = await call(session, "get_order", {"order_id": 987654321})
+        check("unknown id -> structured not_found", (missing or {}).get("error") == "not_found")
+        bad = await call(session, "search_orders", {"status": ["nonsense"]})
+        check("invalid filter -> structured invalid_request",
+              (bad or {}).get("error") == "invalid_request")
+        check("errors carry an actionable hint", bool((bad or {}).get("hint")))
 
 
-async def main() -> int:
+def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--live", action="store_true", help="use FRESHDESK_DOMAIN/FRESHDESK_API_KEY")
+    ap.add_argument("--live", action="store_true",
+                    help="run against a real store from WOO_STORE_URL / WOO_CONSUMER_KEY / WOO_CONSUMER_SECRET")
     args = ap.parse_args()
 
     if args.live:
-        dom, key = os.environ.get("FRESHDESK_DOMAIN"), os.environ.get("FRESHDESK_API_KEY")
-        if not (dom and key):
-            print("Set FRESHDESK_DOMAIN and FRESHDESK_API_KEY for --live", file=sys.stderr)
+        url = os.environ.get("WOO_STORE_URL")
+        key = os.environ.get("WOO_CONSUMER_KEY")
+        secret = os.environ.get("WOO_CONSUMER_SECRET")
+        if not (url and key and secret):
+            print("Set WOO_STORE_URL, WOO_CONSUMER_KEY and WOO_CONSUMER_SECRET for --live")
             return 2
-        await run_session(dom, key, live=True)
+        print(f"{BOLD}Live mode against {url} (read-only){RESET}\n")
+        asyncio.run(run(url, key, secret, live=True))
     else:
-        with mock_freshdesk(rate_limit=200) as url:
-            print(f"{DIM}Mock Freshdesk at {url}{RESET}")
-            await run_session(url, MOCK_KEY, live=False)
-            await run_bad_key(url)
-        with mock_freshdesk(rate_limit=10) as url:
-            await run_rate_limit(url, MOCK_KEY)
+        from mock_server import data as mock_data
+        with mock_store() as base:
+            print(f"{BOLD}Mock WooCommerce at {base}{RESET}\n")
+            asyncio.run(run(base, mock_data.CONSUMER_KEY, mock_data.CONSUMER_SECRET, live=False))
 
-    passed = sum(call.results)
-    print(f"\n{BOLD}{passed}/{len(call.results)} checks passed{RESET}")
-    return 0 if passed == len(call.results) else 1
+    passed = sum(1 for _, ok in checks if ok)
+    total = len(checks)
+    colour = GREEN if passed == total else RED
+    print(f"\n{colour}{BOLD}{passed}/{total} checks passed{RESET}")
+    return 0 if passed == total else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(main())

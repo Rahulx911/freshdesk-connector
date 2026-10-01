@@ -1,80 +1,71 @@
-# CLAUDE.md — Freshdesk connector for Agent Studio
+# CLAUDE.md — WooCommerce connector for Agent Studio
 
 Context for Claude Code working in this repo. Read this first; details live in `docs/`.
 
 ## What this is
 
-A **read-only, payment-aware Freshdesk connector exposed as an MCP server** for Razorpay **Agent Studio** agents. It was built as the Razorpay Forward-Deployed Engineer take-home, **Option 3** ("build a private connector for a merchant tool"; Freshdesk chosen from Freshdesk / Zoho Inventory / WooCommerce / Unicommerce).
+A **read-only, payment-aware WooCommerce connector exposed as an MCP server** for Razorpay **Agent Studio** agents. It was built as the Razorpay Forward-Deployed Engineer take-home, **Option 3** ("build a private connector for a merchant tool"; WooCommerce chosen from Freshdesk / Zoho Inventory / WooCommerce / Unicommerce).
 
-Option 3 asked for: an OAuth or API-key auth flow, list/get/search primitives, rate-limit handling, an MCP tool spec, and a short doc on what the agent can and can't do. All of these are done; the README table maps each requirement to its file.
+The differentiator is **reconciliation**: a WooCommerce refund row only proves a shop manager clicked refund. Whether Razorpay moved the money is a different fact, recorded as a `rfnd_` id. `signals.reconciliation` surfaces that gap, and `store_pulse` ranks the backlog with reasons.
 
-The differentiator is that the connector is **built for Razorpay merchants**: every ticket carries `signals` (Razorpay `pay_/order_/rfnd_/sub_…` ids, UPI UTR/RRN, card ARN, ₹ amounts, merchant order id, an explainable intent, SLA state), and `support_pulse` ranks the backlog with reasons.
-
-Repo: https://github.com/Rahulx911/freshdesk-connector (public). Version 0.3.0. CI is green.
+**The earlier Freshdesk version of this assignment is preserved on the `freshdesk-connector` branch.** Do not delete it.
 
 ## Layout
 
 ```
-src/freshdesk_connector/
-  auth.py          API-key creds, 0600 store, domain validation (SSRF: https only, no IPs/internal hosts)
-  tenancy.py       tenant registry (hashed bearer tokens -> one merchant), RegistryWatcher hot-reload
-  ratelimit.py     credit budgets: in-memory RateLimiter + RedisRateLimiter (atomic Lua, Redis TIME)
-  client.py        httpx client: acquire budget -> GET -> settle; 429 Retry-After, 5xx backoff, fail-fast
-  query.py         typed filters -> Freshdesk search language (model never writes query syntax)
-  service.py       primitives: list/search/get tickets, conversations, contacts, companies,
-                   customer_ticket_history, support_pulse, connector_status; status catalogue (TTL)
-  normalize.py     LLM-shaped records, private-note policy, PII mask, signals + source_url
-  insights.py      payment refs / intent / SLA (deterministic rules, no network)
-  guardrails.py    prompt-injection flags, response size budget (binary search), event tracking
+src/woocommerce_connector/
+  auth.py          consumer key/secret, 0600 store, URL validation (https only, no IPs/internal hosts)
+  oauth.py         OAuth 1.0a one-legged signing, mirroring WC_REST_Authentication
+  ratelimit.py     client-side sliding-window request budget with a 20% reserve
+  client.py        httpx: budget -> GET -> settle; 429/503 Retry-After, 5xx backoff, redirect refusal
+  query.py         typed filters -> wc/v3 params (the model never writes query syntax)
+  service.py       the 11 primitives
+  normalize.py     LLM-shaped records, PII masking, HPOS-aware source_url
+  insights.py      Razorpay refs / reconciliation / intent (deterministic, local, no network)
+  guardrails.py    prompt-injection flags, response size budget (binary search)
   observability.py JSON logs, audit line per tool call (PII-masked), Prometheus metrics
-  mcp_server.py    11 tools + 2 prompts, _call wrapper, ServiceProvider (per-tenant), /healthz /readyz /metrics
-  cli.py           auth login|status|logout, token create, serve, export-spec
-mock_server/       FastAPI Freshdesk test double (fictional "Kettle & Leaf" data; real limits, headers, search grammar)
-evals/             cases.json (19 scenarios) + run.py (--oracle no-LLM, --llm with ANTHROPIC_API_KEY)
-scripts/           demo.py (end-to-end over MCP), loadtest.py, smoke_compose.sh
-tests/             160 tests incl. Hypothesis fuzzing; Redis tests need `redis-server` (skipped if absent)
-docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, FDE_PLAYBOOK, TESTING, mcp_tool_spec.json
+  mcp_server.py    11 tools + 2 prompts
+  cli.py           auth login|status|logout, serve, export-spec
+deploy/woo-local/  real WordPress + WooCommerce in Docker, seeded, mints a Read-scoped key
+mock_server/       FastAPI WooCommerce test double (fictional "Kettle & Leaf" data)
+tests/             149 tests incl. Hypothesis fuzzing and API conformance
+docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, mcp_tool_spec.json
 ```
 
 ## Commands
 
 ```bash
 python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-pytest -q                                   # 160 tests (~20s)
-pytest -q -m "not slow"                     # skip tests that spawn servers
-python scripts/demo.py                      # expect "24/24 checks passed"
-python -m evals.run --oracle                # expect 19/19
+pytest -q                                   # 149 tests (~5s)
+python scripts/demo.py                      # expect "26/26 checks passed"
 ruff check . && mypy && bandit -q -r src    # all must be clean (CI enforces)
-pip-audit --strict -r requirements.lock --require-hashes
-freshdesk-connector export-spec -o docs/mcp_tool_spec.json   # after ANY tool/description change
-bash scripts/smoke_compose.sh               # Docker: 2 replicas + Redis + mock (needs Docker Hub access)
-```
+woocommerce-connector export-spec -o docs/mcp_tool_spec.json   # after ANY tool/description change
 
-Run against a real Freshdesk (read-only): `FRESHDESK_DOMAIN=<sub> FRESHDESK_API_KEY=<key> python scripts/demo.py --live`. Never commit keys.
+# real store, no accounts needed:
+cd deploy/woo-local && docker compose up -d && ./bootstrap.sh
+WOO_STORE_URL=http://localhost:8080 WOO_CONSUMER_KEY=ck_... WOO_CONSUMER_SECRET=cs_... \
+  python scripts/demo.py --live             # expect "15/15 checks passed"
+python scripts/assert_read_only.py          # proves the key cannot write
+```
 
 ## Invariants: don't break these
 
-1. **Read-only.** Only GET requests; every tool is `readOnlyHint=True`. Write tools would need human approval and their own scope; don't add them casually.
-2. **The tenant comes from the bearer token** (`current_tenant()` → `get_access_token().client_id`), never from tool arguments.
-3. **No secrets in the repo, logs or tool output.** Inline `api_key` in the registry is rejected. Tests grep logs for leaks.
-4. **The model never writes Freshdesk query syntax.** Add typed params in `query.py`, with allow-listed characters.
-5. **Signals stay deterministic and local** (`insights.py`). Each intent carries `intent_evidence`. Extend the false-positive corpus in `tests/test_signals.py` whenever you add a pattern.
-6. **Errors are JSON** `{error, message, hint}` via `FreshdeskError.to_dict()`. Unexpected exceptions become `internal_error`.
-7. **Freshdesk facts follow the official API docs** (decimal rate headers, `include` costs 2 credits, custom statuses ≥6 from `/ticket_fields`, inclusive `:>`/`:<` dates, search 30×10 pages, 512-char query). These are pinned in `tests/test_api_conformance.py`.
+1. **Read-only.** Only GET; every tool is `readOnlyHint=True`. The WooCommerce key is Read-scoped, so the store refuses writes independently of this code. Keep it that way.
+2. **The model never writes query syntax.** Add typed params in `query.py` with allow-listed values.
+3. **Signals stay deterministic and local** (`insights.py`). Every intent carries `intent_evidence`. **Extend the false-positive corpus in `tests/test_signals.py` whenever you add a pattern** — a wrong payment reference means a customer is told the wrong thing about their money.
+4. **No secrets in the repo, logs or tool output.** Tests assert the consumer secret cannot appear in any response.
+5. **Errors are JSON** `{error, message, hint}` via `WooError.to_dict()`. Unexpected exceptions become `internal_error`.
+6. **WooCommerce facts follow the real API**, pinned in `tests/test_api_conformance.py`: Basic auth only over HTTPS, `X-WP-Total` paging headers, `per_page` cap 100, guest `customer_id = 0`, `role=all` for customers, HPOS admin links, naive ISO dates.
 
 ## Gotchas
 
-- **The tool spec is checked by a test.** `test_export_spec_matches_committed_file` fails if `docs/mcp_tool_spec.json` is stale. Regenerate it.
-- **The tool count is asserted** (11) in `test_cli.py`, `test_extended.py` and `test_mcp.py` (`EXPECTED`). Update all three when adding a tool.
-- **Mock data is relative to `NOW`** (`mock_server/data.py`), so SLA states and the 30-day window stay realistic. Eval facts (`evals/cases.json`) depend on it; rerun `python -m evals.run --oracle` after changing mock data.
-- Docstrings become tool descriptions; `build_server` runs them through `inspect.cleandoc` so Python 3.13 and older serve identical text.
-- `pytest-asyncio` async fixtures that open MCP sessions break anyio cancel scopes; open sessions inside the test (see `tests/test_evals.py::open_session`).
-- Coverage includes subprocesses (`[tool.coverage.run] patch = ["subprocess"]`).
-- **Pushing:** history on GitHub was created through web uploads, so this local clone tracks GitHub's `main`. Push as **one commit** so CI runs once on a consistent tree. If you ever upload piecemeal, put `[skip ci]` on every commit except the last.
+- **Basic auth silently fails over plain HTTP.** WooCommerce only tries it when `is_ssl()`; otherwise it falls through to OAuth and an unsigned request authenticates as nobody, surfacing as `cannot_view`. That is why `oauth.py` exists.
+- **The tool spec is checked by a test.** Regenerate `docs/mcp_tool_spec.json` after any tool or docstring change.
+- **The tool count is asserted** (11) in `test_mcp.py` and `test_cli.py`.
+- **WooCommerce needs WordPress 7+.** The local stack pins `wordpress:php8.3-apache`, not a 6.x tag.
+- Docstrings become tool descriptions; `inspect.cleandoc` keeps 3.13 and older identical.
 
 ## Status / next steps
 
-- Done: all Option 3 requirements; hosted multi-tenant mode; Redis shared budget; guardrails; observability; eval harness; Docker; CI on Python 3.10–3.13 (lint/types/security/tests/evals/container).
-- Not yet verified against a **live Freshdesk account** (needs a trial). Run `demo.py --live`.
-- LLM-mode evals need an `ANTHROPIC_API_KEY` repo secret; the CI step is skipped until it's set.
-- Natural next features: a Razorpay Payments/Refunds tool pairing with `signals.payment_refs`; write tools behind approval; Freshdesk webhooks → Agent Studio triggers (see `docs/FDE_PLAYBOOK.md`).
+- Done: all Option 3 requirements; **both** auth flows; verified end to end against a real WordPress 7.1 + WooCommerce 11.1 store.
+- Not built: shared rate budget across replicas, multi-tenant registry, webhooks, and the Razorpay Payments/Refunds tool that would turn `reconciliation` from advisory into actionable.

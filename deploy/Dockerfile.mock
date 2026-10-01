@@ -1,8 +1,0 @@
-# Test double only (never deployed): the mock Freshdesk used by the compose smoke test.
-ARG PYTHON_IMAGE=python:3.12-slim
-FROM ${PYTHON_IMAGE}
-RUN python -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir "fastapi>=0.110" "uvicorn>=0.29"
-WORKDIR /app
-COPY mock_server ./mock_server
-USER 10001
-CMD ["/opt/venv/bin/uvicorn", "mock_server.app:app", "--host", "0.0.0.0", "--port", "8765"]

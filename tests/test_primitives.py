@@ -1,135 +1,92 @@
+from __future__ import annotations
+
 import pytest
 
-from freshdesk_connector.errors import InvalidRequest, NotFound
-from freshdesk_connector.query import build_ticket_query
+from woocommerce_connector.errors import InvalidRequest, NotFound
 
 
-# ------------------------------------------------------------------ list
-async def test_list_default_window_has_note(make_service):
-    res = await make_service().list_tickets()
-    assert "note" in res and "30 days" in res["note"]
-    assert res["items"] and all("description" not in t for t in res["items"])
-    assert res["items"][0]["status"] in {"open", "pending", "resolved", "closed", "waiting_on_customer"}
+async def test_list_orders_pages_and_reports_total(service):
+    out = await service.list_orders(per_page=4)
+    assert len(out["items"]) == 4
+    assert out["total_matching"] == 10
+    assert out["has_more"] is True
+    assert out["next_page"] == 2
+    page2 = await service.list_orders(per_page=4, page=2)
+    assert {o["id"] for o in page2["items"]}.isdisjoint({o["id"] for o in out["items"]})
 
 
-async def test_list_pagination(make_service):
-    svc = make_service()
-    p1 = await svc.list_tickets(updated_since="2000-01-01T00:00:00Z", per_page=10)
-    assert p1["count"] == 10 and p1["has_more"] and p1["next_page"] == 2
-    p4 = await svc.list_tickets(updated_since="2000-01-01T00:00:00Z", per_page=10, page=4)
-    from mock_server.data import TICKETS
-    assert p4["count"] == len(TICKETS) - 30 and not p4["has_more"]
-    ids = {t["id"] for t in p1["items"]} & {t["id"] for t in p4["items"]}
-    assert not ids
+async def test_orders_are_newest_first(service):
+    items = (await service.list_orders(per_page=10))["items"]
+    dates = [o["date_created"] for o in items]
+    assert dates == sorted(dates, reverse=True)
 
 
-async def test_list_by_requester_email(make_service):
-    res = await make_service().list_tickets(updated_since="2000-01-01T00:00:00Z",
-                                            requester_email="asha.verma@example.com")
-    assert res["items"] and all(t["requester_id"] == 1000 for t in res["items"])
+async def test_search_by_email_finds_guest_order(service):
+    out = await service.search_orders(search="rohit.bansal@example.com", status=["any"])
+    assert [o["id"] for o in out["items"]] == [1104]
 
 
-@pytest.mark.parametrize("kw", [{"per_page": 101}, {"page": 0}, {"order_by": "subject"},
-                                {"updated_since": "yesterday"}])
-async def test_list_validation(make_service, kw):
+async def test_status_filter(service):
+    out = await service.search_orders(status=["failed", "pending"])
+    assert {o["status"] for o in out["items"]} == {"failed", "pending"}
+
+
+async def test_get_order_includes_items_and_refund_rows(service):
+    o = await service.get_order(1106)
+    assert o["id"] == 1106
+    assert len(o["line_items"]) == 2
+    assert o["refunds"][0]["amount"] == "750.00"
+
+
+async def test_get_order_unknown_id(service):
+    with pytest.raises(NotFound):
+        await service.get_order(999999)
+
+
+async def test_bad_id_is_rejected_before_any_request(service):
     with pytest.raises(InvalidRequest):
-        await make_service().list_tickets(**kw)
+        await service.get_order("not-a-number")
 
 
-# ---------------------------------------------------------------- search
-def test_query_builder():
-    q = build_ticket_query(status=["open", "pending"], priority=["urgent"], tags=["refund"],
-                           created_after="2026-01-01")
-    assert q == "\"(status:2 OR status:3) AND priority:4 AND tag:'refund' AND created_at:>'2026-01-01'\""
+async def test_products_and_stock_filter(service):
+    out = await service.list_products(stock_status="outofstock")
+    assert [p["sku"] for p in out["items"]] == ["KL-AG-500"]
 
 
-@pytest.mark.parametrize("kw", [
-    {"tags": ["x' OR status:5"]},          # injection attempt
-    {"status": ["stuck"]},
-    {"created_after": "last week"},
-    {},
-])
-def test_query_builder_rejects(kw):
+async def test_customer_lookup_by_email(service):
+    out = await service.find_customers(email="ananya.rao@example.com")
+    assert out["items"][0]["id"] == 31
+
+
+async def test_customer_history_for_registered_account(service):
+    out = await service.customer_order_history(customer_id=31)
+    assert out["matched_by"] == "customer_id"
+    assert {o["id"] for o in out["orders"]} == {1101, 1106}
+    assert out["summary"]["orders"] == 2
+
+
+async def test_customer_history_falls_back_to_guest_orders(service):
+    out = await service.customer_order_history(email="rohit.bansal@example.com")
+    assert out["matched_by"] == "guest_email"
+    assert out["customer"] is None
+    assert [o["id"] for o in out["orders"]] == [1104]
+    assert "guest" in out["note"].lower()
+
+
+async def test_customer_history_needs_an_argument(service):
     with pytest.raises(InvalidRequest):
-        build_ticket_query(**kw)
+        await service.customer_order_history()
 
 
-async def test_search_by_status_and_priority(make_service):
-    res = await make_service().search_tickets(status=["open"], priority=["high", "urgent"])
-    assert res["total_matches"] == res["count"] > 0
-    assert all(t["status"] == "open" and t["priority"] in ("high", "urgent") for t in res["items"])
+async def test_refunds_endpoint(service):
+    out = await service.list_order_refunds(1102)
+    assert out["order_id"] == 1102
+    assert out["items"][0]["amount"] == "2450.00"
 
 
-async def test_search_by_tag_and_dates(make_service):
-    res = await make_service().search_tickets(tags=["payments"], created_after="2000-01-01")
-    assert res["count"] > 0 and all("payments" in t["tags"] for t in res["items"])
-
-
-async def test_search_page_bounds(make_service):
-    with pytest.raises(InvalidRequest):
-        await make_service().search_tickets(status=["open"], page=11)
-
-
-# ------------------------------------------------------------------- get
-async def test_get_ticket_full(make_service):
-    t = await make_service().get_ticket(1)
-    assert t["id"] == 1 and "<p>" not in t["description"] and "KL-10200" in t["description"]
-    assert t["requester"]["email"] == "asha.verma@example.com"
-    assert t["conversations"][0]["from"] == "agent"
-    # ticket 1 has an internal note: withheld by default (customer-facing agents) ...
-    assert not any(c["private_note"] for c in t["conversations"])
-    assert t["private_notes_withheld"] == 1
-
-
-async def test_private_notes_opt_in(make_service):
-    t = await make_service(private_notes=True).get_ticket(1)
-    assert any(c["private_note"] for c in t["conversations"]) and "private_notes_withheld" not in t
-
-
-async def test_get_ticket_long_thread_truncated(make_service):
-    svc = make_service()
-    t = await svc.get_ticket(5, max_conversations=10)
-    assert len(t["conversations"]) == 10 and t["conversations_truncated"] is True
-    p2 = await svc.list_ticket_conversations(5, page=2, per_page=10)
-    assert p2["items"][0]["id"] != t["conversations"][0]["id"]
-
-
-async def test_get_ticket_not_found(make_service):
-    with pytest.raises(NotFound) as e:
-        await make_service().get_ticket(99999)
-    assert "search" in e.value.hint
-
-
-# -------------------------------------------------------------- contacts
-async def test_find_contacts(make_service):
-    svc = make_service()
-    assert (await svc.find_contacts(email="MEERA@brewhouse.example"))["items"][0]["id"] == 1002
-    assert (await svc.find_contacts(phone="+91-90000-00005"))["items"][0]["name"] == "Ishita Rao"
-    by_name = await svc.find_contacts(name="Kab")
-    assert [c["name"] for c in by_name["items"]] == ["Kabir Nair"]
-    with pytest.raises(InvalidRequest):
-        await svc.find_contacts(email="a@b.c", name="x")
-
-
-async def test_customer_ticket_history(make_service):
-    res = await make_service().customer_ticket_history(email="kabir.nair@example.com")
-    assert res["contact"]["name"] == "Kabir Nair"
-    assert res["tickets"] and sum(res["status_counts"].values()) == len(res["tickets"])
-    missing = await make_service().customer_ticket_history(email="nobody@example.com")
-    assert missing["contact"] is None
-
-
-async def test_companies(make_service):
-    svc = make_service()
-    hits = await svc.find_companies(name="Br")
-    assert {c["name"] for c in hits["items"]} == {"Brewhouse Cafes", "Brightlane Offices"}
-    comp = await svc.get_company(501)
-    assert comp["health_score"] == "At risk"
-
-
-async def test_pii_redaction(make_service):
-    svc = make_service(redact=True, private_notes=True)
-    t = await svc.get_ticket(1)
-    assert t["requester"]["email"].startswith("a***@")
-    note = next(c for c in t["conversations"] if c["private_note"])
-    assert "90000 11111" not in note["body"] and "***111" in note["body"]
+async def test_connector_status_reports_budget(service):
+    st = await service.connector_status()
+    assert st["connected"] is True
+    assert st["orders_visible"] == 10
+    assert st["rate_budget"]["limit_per_min"] > 0
+    assert "read-only" in st["mode"]

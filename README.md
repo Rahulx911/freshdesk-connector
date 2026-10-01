@@ -1,126 +1,100 @@
-# Freshdesk connector for Agent Studio
+# WooCommerce connector for Agent Studio
 
-A production-grade, **read-only**, **payment-aware** connector that lets Agent Studio agents read a merchant's Freshdesk **tickets, conversations, contacts and companies** through **MCP**. It covers Razorpay's Forward-Deployed Engineer assignment, Option 3.
+A production-grade, **read-only**, **payment-aware** connector that lets Agent Studio agents read a merchant's WooCommerce **orders, refunds, products and customers** through **MCP**. It covers Razorpay's Forward-Deployed Engineer assignment, Option 3.
 
-## Why it's different: built for Razorpay merchants, not just for Freshdesk
+## Why it's different: built for Razorpay merchants, not just for WooCommerce
 
-A large share of a D2C merchant's support tickets are payment questions: "refund not received", "charged twice", "autopay debited". The answer lives in **Razorpay**, not in the helpdesk. A plain Freshdesk reader leaves the agent to guess. This connector turns every ticket into something an agent can act on:
+A generic WooCommerce reader hands an agent an order marked `refunded` and leaves it there. For a Razorpay merchant the question that matters is **whether the money actually moved**, and the evidence for that is scattered across `transaction_id`, the order's `meta_data` and the refund rows. This connector pulls it together.
 
 | | What the agent gets | Why it matters |
 |---|---|---|
-| **Payment references** | `signals.payment_refs`: Razorpay `pay_` / `order_` / `rfnd_` / `sub_` / `inv_`… ids, UPI UTR/RRN, card refund ARN, ₹ amounts and the merchant's order id, collected across the ticket **and its whole thread** | The agent can call Razorpay's Payments/Refunds APIs and answer "where is my refund?" from the source of truth, without copy-paste |
-| **Explainable intent** | `signals.intent` (refund_status, double_charge, payment_failed, autopay_mandate, settlement, delivery…) **with the phrase that triggered it** | Routing and playbooks the merchant can audit; no customer text is sent to a third-party model |
-| **SLA risk** | `signals.sla` from Freshdesk's own `due_by` / `fr_due_by`: overdue, due soon, first response missed | The agent knows when to apologise first and escalate |
-| **One-call triage** | `support_pulse`: the active backlog by intent, priority and status, plus a ranked `needs_attention` list **with reasons** ("SLA overdue by 30h · high priority · payment issue with Razorpay refs") | The question a support lead asks every morning, answered in a single call (≈3 API credits) |
-| **Citations** | `source_url` deep link on every ticket | Answers can be checked with one click |
-| **Guided workflows** | MCP prompts `resolve_payment_ticket` and `daily_triage` | Agent Studio can offer ready-made, safe workflows: verify before promising, never invent a refund status |
+| **Payment references** | `signals.payment_refs`: Razorpay `pay_` / `order_` / `rfnd_` / `sub_` / `plink_`… ids, labelled UPI UTR/RRN, card ARN, pulled from `transaction_id`, plugin `meta_data`, customer notes and refund reasons | The agent can call Razorpay's Payments/Refunds APIs and answer "where is my refund?" from the source of truth |
+| **Reconciliation** | `signals.reconciliation`: the gap between what WooCommerce believes and what the gateway confirms | **The signal this connector exists for.** A WooCommerce refund row only proves a shop manager clicked refund. Without a `rfnd_` id the money may never have left Razorpay, and the customer has been told it has |
+| **Double charge detection** | Two `pay_` ids on one order raises `multiple_payments` | The single most expensive support ticket a D2C merchant gets |
+| **Explainable intent** | `signals.intent` (refund_unconfirmed, double_charge, payment_failed, awaiting_payment, cod_pending…) **with the evidence that triggered it** | Routing the merchant can audit. No customer text is sent to a third-party model |
+| **One-call triage** | `store_pulse`: the recent order mix by payment state, intent and gateway, plus a ranked `needs_attention` list **with reasons** | The question a shop manager asks every morning, answered in one call |
+| **Citations** | `source_url` deep link on every record, HPOS-aware | Answers can be checked in wp-admin with one click |
 
-Example `support_pulse` entry (mock data):
+Example `store_pulse` entry, from the live local store:
+
 ```json
-{"id": 26, "subject": "Refund not received for cancelled order", "priority": "high", "intent": "refund_status",
- "score": 75, "why": ["SLA overdue by 30h", "high priority", "payment issue (refund_status) with Razorpay refs"],
- "source_url": "https://kettleandleaf.freshdesk.com/a/tickets/26"}
+{"id": 20, "number": "20", "status": "processing", "total": "899.00",
+ "payment_state": "paid", "intent": "double_charge", "score": 50,
+ "why": ["possible double charge: more than one Razorpay payment id"],
+ "source_url": "http://localhost:8080/wp-admin/admin.php?page=wc-orders&action=edit&id=20"}
 ```
 
-[![ci](https://github.com/Rahulx911/freshdesk-connector/actions/workflows/ci.yml/badge.svg)](https://github.com/Rahulx911/freshdesk-connector/actions/workflows/ci.yml)
+## Read-only, enforced by the credential
+
+The connector only ever issues `GET`, and every tool is `readOnlyHint=True`. But the real guarantee is one level down: WooCommerce scopes each API key to Read, Write or Read-Write at creation, and this connector asks for a **Read** key. Even a bug in this repository cannot write to the store:
 
 ```
-Agent Studio agent ──MCP (HTTPS + bearer token)──▶ connector replicas ──HTTPS + API key──▶ merchant.freshdesk.com
-                                                    │ token → tenant · credit budget (Redis, shared)
-                                                    │ safe queries · guardrails · audit + metrics
+$ POST /wp-json/wc/v3/orders   (with the connector's key)
+401  woocommerce_rest_authentication_error
+     "The API key provided does not have write permissions."
 ```
+
+That is the store refusing, not us.
+
+## Try it in two minutes
+
+**Against the bundled mock store**, no Docker, no accounts:
+
+```bash
+python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
+python scripts/demo.py        # 26/26 checks
+pytest -q                     # 149 tests
+```
+
+**Against a real WooCommerce**, also with no accounts, because WooCommerce is self-hostable:
+
+```bash
+cd deploy/woo-local && docker compose up -d && ./bootstrap.sh
+# prints a Read-scoped key; then, from the repo root:
+export WOO_STORE_URL=http://localhost:8080
+export WOO_CONSUMER_KEY=ck_...  WOO_CONSUMER_SECRET=cs_...
+python scripts/demo.py --live  # 15/15 checks against WordPress 7.1 + WooCommerce 11.1
+```
+
+This is the reason WooCommerce was chosen: the whole thing is verifiable end to end on a laptop, with no trial, no credit card and no vendor account.
 
 ## What's in it
 
 | Assignment asks for | Where |
 |---|---|
-| OAuth / API-key auth flow | API key validated against `/agents/me` before saving (`auth login`); `0600` store or env or secret files. Hosted mode adds **bearer-token auth per agent, bound to one merchant** via MCP's OAuth resource-server hooks (`tenancy.py`). |
-| list / get / search primitives | 11 tools: `list_tickets`, `search_tickets`, `get_ticket`, `list_ticket_conversations`, `find_contacts`, `get_contact`, `customer_ticket_history`, `find_companies`, `get_company`, `support_pulse`, `connector_status`, plus 2 MCP prompts |
-| Rate-limit handling | Budget counted in **API credits** (Freshdesk charges `include`s extra), learned from the account's headers, 20% reserve for the merchant's other apps, **shared across replicas through an atomic Redis script**, `Retry-After`, bounded waits that fail fast with `retry_after_seconds` |
+| OAuth **or** API-key auth flow | **Both.** HTTP Basic with a consumer key/secret over HTTPS, and full **OAuth 1.0a one-legged signing** for plain-HTTP stores (`oauth.py`), because that is the only thing WooCommerce accepts without TLS. Keys verified at `auth login`, stored `0600`, or taken from the environment |
+| list / get / search primitives | 11 tools: `list_orders`, `search_orders`, `get_order`, `list_order_refunds`, `list_products`, `get_product`, `find_customers`, `get_customer`, `customer_order_history`, `store_pulse`, `connector_status`, plus 2 MCP prompts |
+| Rate-limit handling | WooCommerce core ships **no** rate limiter, so the budget is enforced client side over a sliding 60s window with a 20% reserve, and raised only when the store advertises a real limit. `429` and `503` both honour `Retry-After`; waits are bounded and fail fast with `retry_after_seconds` |
 | MCP tool specification | `mcp_server.py`; exported JSON in [`docs/mcp_tool_spec.json`](docs/mcp_tool_spec.json) |
-| What the agent can / can't do | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) |
-| Working test script | `scripts/demo.py` (end-to-end over MCP), 160 automated tests including property-based fuzzing, 19 agent eval scenarios, load test, compose smoke test. See [`docs/TESTING.md`](docs/TESTING.md) |
-
-Production extras:
-- **LLM guardrails:** customer-written text is flagged when it looks like prompt injection; private notes are withheld by default; responses have a size budget; there are no write tools.
-- **Observability:** JSON audit log per tool call (PII-masked), Prometheus `/metrics`, `/healthz`, `/readyz`.
-- **Agent eval harness:** 19 merchant scenarios (lookups, multi-hop, search, payments, triage, safety, errors) scored on tool choice, arguments, facts and safety. Oracle mode runs in CI; LLM mode runs with Claude when an API key is present.
-- **Zero-downtime operations:** the tenant registry hot-reloads (revoke a token or onboard a merchant in seconds, no redeploy), Freshdesk key rotation is picked up without a restart, and one merchant's bad config degrades only that merchant, not the replica.
-- **Supply chain and runtime:** hash-pinned lockfile, `pip-audit`, `bandit`, `ruff`, `mypy`. The Docker image runs non-root with a read-only filesystem, and compose runs 2 replicas plus Redis.
-- Docs: [architecture](docs/ARCHITECTURE.md), [security model](docs/SECURITY.md), [runbook](docs/RUNBOOK.md), [FDE rollout playbook](docs/FDE_PLAYBOOK.md).
-
-## Quick start (no Freshdesk account needed)
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-pytest -q                       # 160 tests (Redis tests need redis-server; skipped otherwise)
-python scripts/demo.py          # mock Freshdesk + MCP server, every tool, ends "24/24 checks passed"
-python -m evals.run --oracle    # agent eval dataset against the connector, "19/19 passed"
-```
-
-## Use it
-
-**Local, one merchant (stdio).** This is what an MCP client launches:
-
-```bash
-freshdesk-connector auth login --domain yourcompany     # key prompt hidden; verified before saving
-freshdesk-connector serve                               # stdio
-```
-
-```json
-{"mcpServers": {"freshdesk": {"command": "freshdesk-connector", "args": ["serve"]}}}
-```
-
-**Hosted, many merchants (streamable HTTP):**
-
-```bash
-freshdesk-connector token create --tenant acme --name agent-studio-acme-prod   # token shown once
-freshdesk-connector serve --transport streamable-http --host 0.0.0.0 --port 8000 \
-    --tenants deploy/tenants.json            # see deploy/tenants.example.json
-# or: docker compose up   (2 replicas + Redis + mock; scripts/smoke_compose.sh runs it end to end)
-```
-
-The server refuses to listen on a public interface without a tenant registry. Onboarding, key rotation and alerts are in the [runbook](docs/RUNBOOK.md).
-
-**Against a real Freshdesk (read-only):**
-`FRESHDESK_DOMAIN=yourtrial FRESHDESK_API_KEY=... python scripts/demo.py --live`
-
-## Configuration
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `FRESHDESK_DOMAIN`, `FRESHDESK_API_KEY` | – | stdio-mode credentials (override `auth login`) |
-| `FRESHDESK_TENANTS_FILE` / `--tenants` | – | Tenant registry for hosted mode (no secrets inside) |
-| `REDIS_URL` | – | Shared rate budget across replicas (required with >1 replica) |
-| `FRESHDESK_RATE_RESERVE` | `0.2` | Share of the account quota left for the merchant's other apps |
-| `FRESHDESK_MAX_WAIT_S` | `20` | Longest a tool call may wait before returning `rate_limited` |
-| `FRESHDESK_PRIVATE_NOTES` | `exclude` | `include` only for internal copilots (per tenant in hosted mode) |
-| `FRESHDESK_REDACT_PII` | `false` | Mask emails/phones in output (per tenant in hosted mode) |
-| `FRESHDESK_MAX_BODY_CHARS` / `FRESHDESK_MAX_RESPONSE_CHARS` | `2000` / `60000` | Per-message truncation / per-response size budget |
-| `METRICS_TOKEN` or `METRICS_TOKEN_FILE` | – | Bearer token for `/metrics` |
-| `MCP_PUBLIC_URL`, `MCP_ALLOWED_HOSTS` | – | OAuth resource metadata URL; DNS-rebinding protection |
-| `LOG_LEVEL`, `LOG_FORMAT`, `AUDIT_LOG` | `WARNING`, `text`, `on` | Use `json` in production; keep the audit log on |
-
-## Assumptions and limitations
-
-- Freshdesk API v2 with API-key Basic auth (`key:X`). Freshdesk has no merchant-facing OAuth grant for its REST API, so the OAuth piece is on the **agent → connector** side (bearer tokens per agent). Behaviour was checked against the official API reference; see [TESTING.md](docs/TESTING.md).
-- Read-only. No attachment download, KB articles or satisfaction data yet.
-- Freshdesk search has no full-text search, returns at most 300 results, skips archived tickets, and indexes with a short delay. Phone lookup only matches numbers in the format they were stored (common Indian formats are tried).
-- The prompt-injection detector and intent rules are deterministic heuristics: explainable and tested for false positives, but not exhaustive. The real safety boundary is that there are no write tools and the tenant comes from the token.
-- Payment references are extracted, not verified. The connector never claims a payment or refund status; that is for Razorpay's APIs.
-- Everything is tested against a faithful mock and the docs. **No live Freshdesk account was used**; run `demo.py --live` on a trial account to close that gap.
+| What the agent can and can't do | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) |
 
 ## Layout
 
 ```
-src/freshdesk_connector/   auth, tenancy, ratelimit, client, query, service, normalize,
-                           insights (payment refs / intent / SLA), guardrails, observability, mcp_server, cli
-mock_server/               Freshdesk test double (fictional data, real limits/headers/search syntax)
-evals/                     agent eval dataset + harness (oracle and LLM modes)
-scripts/                   demo.py, loadtest.py, smoke_compose.sh
-tests/                     160 tests: unit, API-conformance, CLI, production (auth/Redis/guardrails), signals, fuzzing, evals
-docs/                      CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, FDE_PLAYBOOK, TESTING, tool spec
-Dockerfile, docker-compose.yml, deploy/, requirements.lock, .github/workflows/ci.yml
+src/woocommerce_connector/
+  auth.py          consumer key/secret, 0600 store, URL validation (https only, no IPs/internal hosts)
+  oauth.py         OAuth 1.0a one-legged signing, matching WooCommerce's own implementation
+  ratelimit.py     client-side sliding-window request budget with reserve
+  client.py        httpx: budget -> GET -> settle; 429/503 Retry-After, 5xx backoff, redirect refusal
+  query.py         typed filters -> wc/v3 params (the model never writes query syntax)
+  service.py       the 11 primitives
+  normalize.py     LLM-shaped records, PII masking, HPOS-aware source_url
+  insights.py      Razorpay refs / reconciliation / intent (deterministic, local, no network)
+  guardrails.py    prompt-injection flags, response size budget (binary search)
+  observability.py JSON logs, audit line per tool call (PII-masked), Prometheus metrics
+  mcp_server.py    11 tools + 2 prompts, _call wrapper
+  cli.py           auth login|status|logout, serve, export-spec
+deploy/woo-local/  a real WordPress + WooCommerce store in Docker, seeded, with a read-only key
+mock_server/       FastAPI WooCommerce test double (fictional "Kettle & Leaf" data)
+tests/             149 tests including Hypothesis fuzzing and API conformance
+docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, mcp_tool_spec.json
 ```
+
+## Honest limitations
+
+Read [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) for the full list. The short version:
+
+- **Read-only.** No refunds, no status changes, no cancellations. Those need a human.
+- **Single replica.** The rate budget is in-process. Several replicas against one store need a shared backend.
+- **WooCommerce core only.** Subscriptions and Bookings expose their own endpoints that are not wired up.
+- **The Razorpay side is not called.** The connector finds the references; pairing it with a Razorpay Payments/Refunds tool is the obvious next step and is what makes `reconciliation` actionable rather than advisory.

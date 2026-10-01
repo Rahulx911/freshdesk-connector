@@ -1,67 +1,60 @@
 # Architecture
 
-## Request path
-
-```mermaid
-flowchart LR
-    A[Agent Studio agent] -- "MCP over HTTPS<br/>Bearer token" --> LB[Load balancer]
-    LB --> R1[connector replica 1]
-    LB --> R2[connector replica N]
-    subgraph replica [each replica - stateless]
-      AUTH[Token verifier<br/>token → tenant] --> TOOLS[11 read-only MCP tools<br/>+ 2 prompts]
-      TOOLS --> SVC[FreshdeskService<br/>per tenant]
-      SVC --> GR[Normaliser + guardrails<br/>enum mapping · HTML→text · injection flags<br/>private-note policy · PII mask · size budget]
-      SVC --> SIG[Payment-aware signals<br/>Razorpay refs · UTR/ARN · intent · SLA]
-      SVC --> CL[FreshdeskClient<br/>credit budget · Retry-After · backoff]
-    end
-    R1 & R2 -- "atomic Lua: check + reserve credits" --> REDIS[(Redis<br/>budget per Freshdesk domain)]
-    CL -- "HTTPS GET, Basic key:X" --> FD[merchant.freshdesk.com]
-    R1 & R2 -. "/metrics · JSON audit logs" .-> OBS[Prometheus / log pipeline]
+```
+Agent Studio agent ──MCP (stdio)──▶ connector ──HTTPS + Basic ──▶ shop.example.com/wp-json/wc/v3
+                                      │                   or OAuth 1.0a (plain HTTP stores)
+                                      │ typed filters · request budget
+                                      │ guardrails · audit + metrics
 ```
 
-One tool call, step by step:
+## Request path
 
-1. **Auth** (HTTP mode): `RegistryTokenVerifier` hashes the bearer token and looks it up with constant-time comparison. The **tenant comes from the token**, never from tool arguments, so a prompt-injected agent cannot read another merchant's data.
-2. **`_call` wrapper** (`mcp_server.py`): resolves the tenant's `FreshdeskService` (cached), and starts metering: latency, Freshdesk credits, upstream requests, guardrail events.
-3. **Service** (`service.py`): validates arguments and builds safe Freshdesk queries (`query.py`; the model never writes query syntax). It loads the account's custom ticket statuses from `/ticket_fields` once.
-4. **Client** (`client.py`): `acquire(cost)` against the rate budget. The cost is predicted from `include` and corrected from `X-RateLimit-Used-CurrentRequest`. If the wait would exceed `FRESHDESK_MAX_WAIT_S`, the call fails fast with `rate_limited` and `retry_after_seconds`. On a 429 it honours `Retry-After`; on 5xx or network errors it backs off with jitter. All calls are GETs, so retries are safe.
-5. **Normaliser and guardrails** (`normalize.py`, `guardrails.py`): turn numeric codes into words, convert HTML to text, truncate long bodies, withhold private notes (default), flag injection attempts, mask PII (per tenant), and apply the response size budget.
-6. **Result or error.** Every error is JSON with `error`, `message` and `hint`. Unexpected exceptions become `internal_error`; details go to the logs only.
-7. **Audit and metrics.** Each call writes one JSON audit line (arguments PII-masked) and updates Prometheus counters and histograms.
+1. **`mcp_server._call`** wraps every tool: resets per-call counters, opens an
+   audit span, and converts any exception into `{error, message, hint}` JSON.
+   The model never sees a traceback.
+2. **`query.py`** turns typed arguments into `wc/v3` parameters against an
+   allow-list. The model cannot write query syntax, so a prompt-injected
+   `role=administrator` never becomes a request.
+3. **`ratelimit.py`** reserves budget before the call and settles it after,
+   learning the store's real limit from `RateLimit-*` headers if it sends any.
+4. **`client.py`** issues the GET, handles `429`/`503`/`5xx`/network, and
+   refuses redirects so a misconfigured store cannot forward the credential
+   to another host.
+5. **`insights.py`** derives signals locally. No network, no model.
+6. **`normalize.py`** shrinks the payload, masks PII and attaches a citation.
+7. **`guardrails.py`** flags customer-authored text and enforces the response
+   size budget by binary-searching the largest list prefix that fits.
 
-## Modules
+## Why the rate limiter is client-side
 
-| Module | Responsibility |
+WooCommerce core does not rate limit the REST API. Throttling comes from the
+host (WP Engine, Kinsta, Cloudflare) as `429` or `503`, or from the Store API
+if a merchant enabled it. The dangerous case is the third one: nothing
+throttles, and an agent paging through orders takes a shared-hosting store
+down. So the budget is enforced here regardless of what the store says, with a
+20% reserve left for the merchant's other integrations, and raised only when
+the store advertises a real limit.
+
+## Why OAuth 1.0a is implemented at all
+
+`WC_REST_Authentication::authenticate()` only attempts Basic auth when
+`is_ssl()` is true, then falls through to OAuth. A plain-HTTP store therefore
+authenticates a key/secret query string as *nobody*, and every call returns
+`woocommerce_rest_cannot_view`, which looks like a permissions problem. Since
+local development stores are the normal plain-HTTP case, and since the
+assignment asked for an auth flow, both are implemented and the transport
+picks between them.
+
+The signature construction mirrors WooCommerce's own, including two places it
+departs from the spec: each `key=value` pair is RFC 3986 encoded as a whole
+string and the pairs joined with `%26`, and the signing key is
+`consumer_secret + "&"` with no token secret.
+
+## Known gaps and the shape of the fix
+
+| Gap | Fix |
 |---|---|
-| `auth.py` | API-key credentials, `0600` local store, domain validation (SSRF hygiene) |
-| `tenancy.py` | Tenant registry (no secrets inside), hashed bearer tokens, MCP `TokenVerifier`, hot-reloading `RegistryWatcher` |
-| `ratelimit.py` | Credit budgets: in-memory and Redis (atomic Lua, Redis server time) |
-| `client.py` | HTTP, retries, error mapping, per-call credit accounting |
-| `query.py` | Typed filters → Freshdesk search language (allow-listed characters, 512-char cap) |
-| `service.py` | list/get/search primitives, status catalogue, composite `customer_ticket_history` |
-| `normalize.py` | LLM-shaped records, private-note policy, PII masking, `signals` + `source_url` |
-| `insights.py` | Payment-aware signals: Razorpay ref / UTR / ARN / amount extraction, explainable intent rules, SLA state |
-| `guardrails.py` | Prompt-injection detector, response size budget, guardrail event tracking |
-| `observability.py` | JSON logs, audit trail, Prometheus registry |
-| `mcp_server.py` | Tool definitions, `_call` wrapper, server factory, `/healthz` `/readyz` `/metrics` |
-| `cli.py` | `auth login/status/logout`, `token create`, `serve`, `export-spec` |
-
-## Deployment shapes
-
-| | stdio | Hosted HTTP |
-|---|---|---|
-| Merchants | 1 (env vars or `auth login`) | many (tenant registry) |
-| Auth | process boundary | bearer token → tenant (SHA-256 hashed at rest) |
-| State | in-process | none in the replica; budget in Redis |
-| Scaling | n/a | horizontal (stateless streamable HTTP, JSON responses) |
-| Use | local agents, demo, CI | Agent Studio production |
-
-## Design decisions and trade-offs
-
-- **Read-only v1.** Most merchant support questions are lookups. Write tools ("add note", "set status") are the next step, behind human approval and with their own scopes. They are not exposed to a model on day one.
-- **Budget in credits, per Freshdesk domain.** Freshdesk charges `include`s extra and limits per account. Keying the budget by domain means two tenants pointing at the same helpdesk share one budget.
-- **Fail fast rather than queue.** A chat user waiting 60 seconds is worse than an honest "temporarily unavailable". `max_wait` bounds how long any call can hang.
-- **Deterministic guardrails rather than an LLM classifier.** Regex flags are cheap, explainable and testable for false positives. They *flag* rather than *block*, because the merchant still needs to see a suspicious ticket. A model-based classifier can be added later behind the same `content_flags` contract.
-- **Signals by deterministic rules, not an LLM.** Ticket text never leaves the connector for classification. Every intent comes with the phrase that triggered it, and the extractors are fuzzed and tested against false positives (phones, pincodes, GSTINs). An ML classifier can replace the rules later behind the same `signals` contract.
-- **Hot configuration, cold secrets.** The registry (which tokens map to which merchant) reloads on file change. Freshdesk keys are re-read on every call and the client is rebuilt only when a key changes, so rotation and revocation need no restart.
-- **The tenant comes from the token.** Moving the tenant into tool arguments would turn every prompt injection into a cross-merchant data leak.
+| Rate budget is in-process, so replicas each think they have the whole budget | Move `RateLimiter` behind the same async interface backed by Redis, with check-and-reserve as one atomic script using server time |
+| One store per process | A tenant registry keyed by hashed bearer token, resolving the tenant server-side so it can never come from a tool argument |
+| Pull only | WooCommerce webhooks into an Agent Studio trigger, with HMAC verification |
+| References found but not resolved | A Razorpay Payments/Refunds tool, so `reconciliation` reports what the gateway says rather than where to look |
