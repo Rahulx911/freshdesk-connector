@@ -88,7 +88,7 @@ call.results = []
 
 
 async def run_session(base_url: str, api_key: str, *, live: bool) -> None:
-    env = {**os.environ, "LOG_LEVEL": "ERROR", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": api_key,
+    env = {**os.environ, "LOG_LEVEL": "ERROR", "AUDIT_LOG": "off", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": api_key,
            "FRESHDESK_MAX_WAIT_S": "5"}
     params = StdioServerParameters(command=sys.executable,
                                    args=["-m", "freshdesk_connector.cli", "serve"], env=env)
@@ -138,7 +138,7 @@ async def run_session(base_url: str, api_key: str, *, live: bool) -> None:
 
 async def run_bad_key(base_url: str) -> None:
     print(f"\n{BOLD}== Wrong API key{RESET}")
-    env = {**os.environ, "LOG_LEVEL": "ERROR", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": "not-a-real-key"}
+    env = {**os.environ, "LOG_LEVEL": "ERROR", "AUDIT_LOG": "off", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": "not-a-real-key"}
     params = StdioServerParameters(command=sys.executable,
                                    args=["-m", "freshdesk_connector.cli", "serve"], env=env)
     async with stdio_client(params) as (r, w), ClientSession(r, w) as session:
@@ -148,7 +148,7 @@ async def run_bad_key(base_url: str) -> None:
 
 async def run_rate_limit(base_url: str, api_key: str) -> None:
     print(f"\n{BOLD}== Rate limiting (mock account limit 10/min, connector keeps 20% reserve){RESET}")
-    env = {**os.environ, "LOG_LEVEL": "ERROR", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": api_key,
+    env = {**os.environ, "LOG_LEVEL": "ERROR", "AUDIT_LOG": "off", "FRESHDESK_DOMAIN": base_url, "FRESHDESK_API_KEY": api_key,
            "FRESHDESK_MAX_WAIT_S": "3"}
     params = StdioServerParameters(command=sys.executable,
                                    args=["-m", "freshdesk_connector.cli", "serve"], env=env)
