@@ -52,13 +52,19 @@ def build_ticket_query(
     updated_after: str | None = None,
     updated_before: str | None = None,
     due_before: str | None = None,
+    unassigned: bool = False,
+    status_ids: dict[str, int] | None = None,
 ) -> str:
+    """status names are resolved through `status_ids` (the account's catalogue,
+    incl. custom statuses); defaults to Freshdesk's built-in 2-5.
+    Date bounds are inclusive: Freshdesk's :> / :< mean >= / <=."""
+    sids = status_ids or STATUS_IDS
     clauses: list[str] = []
     if status:
-        bad = [s for s in status if s not in STATUS_IDS]
+        bad = [s for s in status if s not in sids]
         if bad:
-            raise InvalidRequest(f"Unknown status {bad}; allowed: {sorted(STATUS_IDS)}")
-        clauses.append(_or_group([f"status:{STATUS_IDS[s]}" for s in status]))
+            raise InvalidRequest(f"Unknown status {bad}; this account's statuses: {sorted(sids)}")
+        clauses.append(_or_group([f"status:{sids[s]}" for s in status]))
     if priority:
         bad = [p for p in priority if p not in PRIORITY_IDS]
         if bad:
@@ -68,13 +74,17 @@ def build_ticket_query(
         clauses.append(_or_group([_str_lit("tag", t) for t in tags]))
     if ticket_type:
         clauses.append(_str_lit("type", ticket_type))
+    if agent_id is not None and unassigned:
+        raise InvalidRequest("Use either agent_id or unassigned, not both")
     if agent_id is not None:
         clauses.append(f"agent_id:{int(agent_id)}")
+    if unassigned:
+        clauses.append("agent_id:null")
     if group_id is not None:
         clauses.append(f"group_id:{int(group_id)}")
     for field, op, val in (
-        ("created_at", ">", created_after),
-        ("created_at", "<", created_before),
+        ("created_at", ">", created_after),     # on or after
+        ("created_at", "<", created_before),    # on or before
         ("updated_at", ">", updated_after),
         ("updated_at", "<", updated_before),
         ("due_by", "<", due_before),

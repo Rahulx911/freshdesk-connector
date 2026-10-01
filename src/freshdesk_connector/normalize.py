@@ -11,8 +11,9 @@ import html
 import re
 from typing import Any
 
-STATUS = {2: "open", 3: "pending", 4: "resolved", 5: "closed",
-          6: "waiting_on_customer", 7: "waiting_on_third_party"}
+# Freshdesk's built-in statuses. Accounts add custom ones (e.g. 6 "Waiting on Customer");
+# those are loaded per account from /api/v2/ticket_fields (see FreshdeskService.statuses).
+STATUS = {2: "open", 3: "pending", 4: "resolved", 5: "closed"}
 STATUS_IDS = {v: k for k, v in STATUS.items()}
 PRIORITY = {1: "low", 2: "medium", 3: "high", 4: "urgent"}
 PRIORITY_IDS = {v: k for k, v in PRIORITY.items()}
@@ -25,6 +26,10 @@ _WS_RE = re.compile(r"[ \t]+")
 _NL_RE = re.compile(r"\n{3,}")
 _EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
 _PHONE_RE = re.compile(r"(?<!\d)(\+?\d[\d\s-]{7,}\d)(?!\d)")
+
+
+def slugify(label: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
 
 
 def html_to_text(s: str | None) -> str:
@@ -52,6 +57,7 @@ class Normalizer:
     def __init__(self, *, redact_pii: bool = False, max_body_chars: int = 2000):
         self.redact_pii = redact_pii
         self.max_body_chars = max_body_chars
+        self.status_names: dict[int, str] = dict(STATUS)
 
     def _pii(self, v: Any) -> Any:
         if self.redact_pii and isinstance(v, str):
@@ -62,11 +68,16 @@ class Normalizer:
         text = raw_text if raw_text else html_to_text(raw_html)
         return self._pii(truncate(text, self.max_body_chars))
 
+    def _status(self, sid: object) -> object:
+        if isinstance(sid, int):
+            return self.status_names.get(sid, f"status_{sid}")
+        return sid
+
     def ticket(self, t: dict, *, include_body: bool = False) -> dict:
         out = {
             "id": t.get("id"),
             "subject": t.get("subject"),
-            "status": STATUS.get(t.get("status"), t.get("status")),
+            "status": self._status(t.get("status")),
             "priority": PRIORITY.get(t.get("priority"), t.get("priority")),
             "source": SOURCE.get(t.get("source"), t.get("source")),
             "type": t.get("type"),
