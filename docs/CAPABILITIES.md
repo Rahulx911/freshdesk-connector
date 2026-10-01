@@ -19,9 +19,13 @@ It **cannot change anything**. It can't reply to customers, update tickets, add 
 | "Summarise the conversation on ticket 4512" | `get_ticket(4512)`, then `list_ticket_conversations` if `conversations_truncated` |
 | "Who is +91 98xxxxxx21?" | `find_contacts(phone=…)` |
 | "How many open tickets does Brewhouse Cafes have, and are they at risk?" | `find_companies` → `get_company` → `list_tickets(company_id=…)` |
+| "Where's my refund?" (customer on a ticket) | `get_ticket` → `signals.payment_refs` (`pay_…`, `rfnd_…`, UTR) → Razorpay Refunds API (if the agent has it) |
+| "What should the team work on first?" | `support_pulse` → ranked `needs_attention` with reasons |
+| "How much of our backlog is payment-related?" | `support_pulse` → `payment_related`, `by_intent` |
 | "Is the connector working / whose access is it using?" | `connector_status` |
 
 The data comes back shaped for an LLM:
+- **Every ticket has `signals`:** `intent` + `intent_evidence` + `payment_related`, `payment_refs` (Razorpay entity ids, UTR/RRN, card ARN, ₹ amounts, merchant order id, collected across the ticket and its thread) and `sla` (overdue / due soon / first response missed). Plus `source_url` for citations.
 - Status, priority and source are words (`"pending"`), not Freshdesk's numeric codes. Custom statuses (e.g. `waiting_on_customer`) are read from the merchant's own account.
 - HTML bodies are converted to text and capped (2,000 chars by default).
 - Every list result says `has_more` / `next_page`, so the agent knows when it has only part of the data.
