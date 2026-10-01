@@ -10,7 +10,8 @@ from typing import Any
 
 from .client import FreshdeskClient
 from .errors import InvalidRequest, NotFound
-from .normalize import Normalizer
+from .errors import FreshdeskError
+from .normalize import STATUS, Normalizer, slugify
 from .query import build_ticket_query, iso_or_none
 
 SEARCH_PAGE_SIZE = 30   # fixed by Freshdesk for /search
@@ -39,6 +40,26 @@ class FreshdeskService:
     def __init__(self, client: FreshdeskClient, normalizer: Normalizer | None = None):
         self.c = client
         self.n = normalizer or Normalizer()
+        self._statuses_loaded = False
+
+    async def statuses(self) -> dict[int, str]:
+        """The account's ticket statuses, including custom ones, read once from
+        /api/v2/ticket_fields. Falls back to the built-in 2-5 if the key can't read fields."""
+        if not self._statuses_loaded:
+            try:
+                fields = await self.c.get_json("/api/v2/ticket_fields")
+                for f in fields:
+                    if f.get("type") == "default_status" and isinstance(f.get("choices"), dict):
+                        names: dict[int, str] = {}
+                        for sid, labels in f["choices"].items():
+                            label = labels[0] if isinstance(labels, list) and labels else str(labels)
+                            names[int(sid)] = slugify(label)
+                        if names:
+                            self.n.status_names = names
+            except FreshdeskError:
+                self.n.status_names = dict(STATUS)
+            self._statuses_loaded = True
+        return self.n.status_names
 
     # ---------------------------------------------------------------- tickets
     async def list_tickets(
@@ -54,6 +75,7 @@ class FreshdeskService:
         per_page: int = 30,
     ) -> dict:
         page, per_page = _page_args(page, per_page)
+        await self.statuses()
         if order_by not in ORDER_FIELDS:
             raise InvalidRequest(f"order_by must be one of {sorted(ORDER_FIELDS)}")
         if order not in ("asc", "desc"):
@@ -79,7 +101,8 @@ class FreshdeskService:
     async def search_tickets(self, *, page: int = 1, **filters: Any) -> dict:
         if not 1 <= page <= SEARCH_MAX_PAGE:
             raise InvalidRequest(f"search page must be between 1 and {SEARCH_MAX_PAGE}")
-        query = build_ticket_query(**filters)
+        names = await self.statuses()
+        query = build_ticket_query(status_ids={v: k for k, v in names.items()}, **filters)
         data = await self.c.get_json("/api/v2/search/tickets", {"query": query, "page": page})
         total = int(data.get("total", 0))
         results = data.get("results", [])
@@ -94,6 +117,7 @@ class FreshdeskService:
     async def get_ticket(
         self, ticket_id: int, *, include_conversations: bool = True, max_conversations: int = 20
     ) -> dict:
+        await self.statuses()
         t = await self.c.get_json(f"/api/v2/tickets/{int(ticket_id)}",
                                   {"include": "requester,stats"})
         out = self.n.ticket(t, include_body=True)
@@ -125,10 +149,28 @@ class FreshdeskService:
         if email:
             data = await self.c.get_json("/api/v2/contacts", {"email": email.strip().lower()})
         elif phone:
-            digits = "".join(ch for ch in phone if ch.isdigit() or ch == "+")
-            data = await self.c.get_json("/api/v2/contacts", {"phone": digits})
-            if not data:
-                data = await self.c.get_json("/api/v2/contacts", {"mobile": digits})
+            # Freshdesk matches phone/mobile exactly as stored, and merchants store numbers
+            # inconsistently ("+91 98200 12345", "9820012345", "+919820012345"). Try the
+            # common shapes (Indian formats included), stopping at the first hit.
+            # Worst case costs 2 credits per variant, so the list is kept short.
+            raw = phone.strip()
+            digits = "".join(ch for ch in raw if ch.isdigit())
+            last10 = digits[-10:]
+            variants = list(dict.fromkeys(v for v in (
+                raw,
+                ("+" + digits) if raw.startswith("+") else digits,
+                last10,
+                f"+91{last10}" if len(last10) == 10 else "",
+                f"+91 {last10[:5]} {last10[5:]}" if len(last10) == 10 else "",
+            ) if v))
+            data = []
+            for v in variants:
+                for field in ("phone", "mobile"):
+                    data = await self.c.get_json("/api/v2/contacts", {field: v})
+                    if data:
+                        break
+                if data:
+                    break
         else:
             if len(name.strip()) < 2:
                 raise InvalidRequest("name must be at least 2 characters")
@@ -180,6 +222,7 @@ class FreshdeskService:
             "freshdesk_url": self.c.creds.base_url,
             "authenticated_as": {"agent_id": me.get("id"), "name": contact.get("name")},
             "access": "read-only",
+            "ticket_statuses": sorted((await self.statuses()).values()),
             "pii_redaction": self.n.redact_pii,
             "rate_limit": self.c.rl.snapshot(),
         }
