@@ -19,12 +19,13 @@ shared by every integration the merchant runs, so we must be polite):
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import random
 import re
 import time
-from collections import deque
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -38,103 +39,17 @@ from .errors import (
     RateLimited,
     UpstreamError,
 )
+from .ratelimit import DEFAULT_LIMIT_PER_MIN, RateLimiter, RedisRateLimiter, request_cost
+
+__all__ = ["DEFAULT_LIMIT_PER_MIN", "FreshdeskClient", "RateLimiter", "RedisRateLimiter", "request_cost"]
 
 log = logging.getLogger("freshdesk_connector")
 
-DEFAULT_LIMIT_PER_MIN = 50  # lowest Freshdesk plan/trial limit; replaced once header seen
-USER_AGENT = "agent-studio-freshdesk-connector/0.1"
+USER_AGENT = "agent-studio-freshdesk-connector/0.2"
 
-
-def _num(v: str | None) -> float | None:
-    """Freshdesk sends rate-limit headers as decimals ("700.0"), so parse as float."""
-    if v is None:
-        return None
-    try:
-        return float(v)
-    except ValueError:
-        return None
-
-
-def request_cost(params: dict[str, Any] | None) -> int:
-    """API credits a call consumes. Freshdesk docs: each `include` costs 2 extra
-    credits (include=stats -> 3 total); include=conversations costs 1 extra."""
-    inc = [x for x in str((params or {}).get("include") or "").split(",") if x]
-    return 1 + sum(1 if x == "conversations" else 2 for x in inc)
-
-
-class RateLimiter:
-    """Sliding 60s window measured in API *credits*, not requests."""
-
-    def __init__(
-        self,
-        limit_per_min: int = DEFAULT_LIMIT_PER_MIN,
-        reserve_fraction: float = 0.2,
-        clock: Callable[[], float] = time.monotonic,
-    ):
-        self.limit = limit_per_min
-        self.reserve_fraction = reserve_fraction
-        self.clock = clock
-        self._sent: deque[list] = deque()   # [timestamp, credits]; mutable so a charge can be corrected
-        self.server_remaining: int | None = None
-        self._lock = asyncio.Lock()
-
-    @property
-    def budget(self) -> int:
-        """Credits per rolling minute this connector allows itself."""
-        return max(1, int(self.limit * (1 - self.reserve_fraction)))
-
-    def _trim(self, now: float) -> None:
-        while self._sent and now - self._sent[0][0] >= 60:
-            self._sent.popleft()
-
-    def used(self) -> int:
-        self._trim(self.clock())
-        return sum(c for _, c in self._sent)
-
-    def required_wait(self, cost: int = 1) -> float:
-        now = self.clock()
-        self._trim(now)
-        waits = [0.0]
-        cost = min(cost, self.budget)
-        used = sum(c for _, c in self._sent)
-        if used + cost > self.budget:
-            # wait until enough of the oldest credits expire from the window
-            need, freed = used + cost - self.budget, 0
-            for ts, c in self._sent:
-                freed += c
-                if freed >= need:
-                    waits.append(60 - (now - ts))
-                    break
-        # Server says the shared account quota is nearly gone (other apps using it):
-        # space our calls out across the rest of the window.
-        if self.server_remaining is not None and self.server_remaining < max(cost, int(self.limit * 0.05)):
-            oldest = self._sent[0][0] if self._sent else now
-            waits.append(max(1.0, 60 - (now - oldest)))
-        return max(waits)
-
-    def record(self, cost: int = 1) -> list:
-        entry = [self.clock(), cost]
-        self._sent.append(entry)
-        return entry
-
-    def observe_headers(self, headers: httpx.Headers, entry: list | None = None) -> None:
-        total = _num(headers.get("x-ratelimit-total"))
-        remaining = _num(headers.get("x-ratelimit-remaining"))
-        used = _num(headers.get("x-ratelimit-used-currentrequest"))
-        if total and total > 0:
-            self.limit = int(total)
-        if remaining is not None:
-            self.server_remaining = int(remaining)
-        if used and entry is not None:
-            entry[1] = int(used)              # correct our estimate with the real charge
-
-    def snapshot(self) -> dict:
-        return {
-            "account_limit_per_min": self.limit,
-            "connector_budget_per_min": self.budget,
-            "credits_used_last_60s": self.used(),
-            "server_reported_remaining": self.server_remaining,
-        }
+# Credits spent by the current tool call (read by the observability layer).
+credits_spent: contextvars.ContextVar[int] = contextvars.ContextVar("credits_spent", default=0)
+upstream_calls: contextvars.ContextVar[int] = contextvars.ContextVar("upstream_calls", default=0)
 
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
@@ -145,7 +60,7 @@ class FreshdeskClient:
         self,
         creds: Credentials,
         *,
-        rate_limiter: RateLimiter | None = None,
+        rate_limiter: Any = None,  # RateLimiter | RedisRateLimiter (same async interface)
         max_wait_s: float = 20.0,
         max_retries: int = 3,
         timeout_s: float = 15.0,
@@ -171,7 +86,7 @@ class FreshdeskClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def __aenter__(self) -> "FreshdeskClient":
+    async def __aenter__(self) -> FreshdeskClient:
         return self
 
     async def __aexit__(self, *exc) -> None:
@@ -185,17 +100,18 @@ class FreshdeskClient:
         deadline = time.monotonic() + self.max_wait_s
         attempt = 0
         while True:
-            async with self.rl._lock:
-                wait = self.rl.required_wait(cost)
-                if wait > 0:
-                    if time.monotonic() + wait > deadline:
-                        raise RateLimited(
-                            "Connector-side rate budget exhausted for this minute",
-                            retry_after=wait, status=None,
-                        )
-                    log.info("throttling %.1fs before %s", wait, path)
-                    await self._sleep(wait)
-                entry = self.rl.record(cost)
+            entry, wait = await self.rl.acquire(cost)
+            if entry is None:
+                if time.monotonic() + wait > deadline:
+                    raise RateLimited(
+                        "Connector-side rate budget exhausted for this minute",
+                        retry_after=wait, status=None,
+                    )
+                log.info("throttling %.1fs before %s", wait, path)
+                await self._sleep(wait)
+                continue
+            credits_spent.set(credits_spent.get() + cost)
+            upstream_calls.set(upstream_calls.get() + 1)
             try:
                 resp = await self._http.get(path, params=params)
             except (httpx.TimeoutException, httpx.TransportError) as e:
@@ -205,7 +121,7 @@ class FreshdeskClient:
                 await self._backoff(attempt, deadline)
                 continue
 
-            self.rl.observe_headers(resp.headers, entry)
+            await self.rl.settle(entry, resp.headers)
 
             if resp.status_code == 429:
                 retry_after = _parse_retry_after(resp.headers.get("retry-after"))
@@ -228,7 +144,8 @@ class FreshdeskClient:
             return resp
 
     async def _backoff(self, attempt: int, deadline: float) -> None:
-        delay = min(8.0, 0.5 * 2 ** (attempt - 1)) * (0.5 + random.random())
+        # jitter for retry backoff; not used for anything security-sensitive
+        delay = min(8.0, 0.5 * 2 ** (attempt - 1)) * (0.5 + random.random())  # nosec B311
         if time.monotonic() + delay > deadline:
             raise UpstreamError("Freshdesk kept failing; gave up within the time budget")
         await self._sleep(delay)
