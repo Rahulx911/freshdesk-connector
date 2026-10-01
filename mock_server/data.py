@@ -61,10 +61,11 @@ _SCENARIOS = [
     ("Order #KL-{n} not delivered yet", "Delivery", ["shipping"], "Question",
      "<p>Hi, my order <b>#KL-{n}</b> was due 3 days ago and tracking hasn't moved. Please help.</p>"),
     ("Refund not received for cancelled order", "Refund", ["refund", "payments"], "Refund",
-     "<p>I cancelled my order on the same day but the refund hasn't reached my account. "
-     "UPI ref ending 4421.</p>"),
+     "<p>I cancelled my order on the same day but the refund of Rs 1,499 hasn't reached my account. "
+     "Payment ID pay_KL{n}QzXwVuT, UPI ref no 4123{n}789.</p>"),
     ("Autopay subscription charged twice", "Billing", ["subscription", "payments"], "Problem",
-     "<div>My monthly tea subscription was debited twice this month. Please reverse one.</div>"),
+     "<div>My monthly tea subscription sub_KL{n}MnBvCxZ was debited twice this month "
+     "(pay_KL{n}AaBbCcD and pay_KL{n}EeFfGgH, Rs 899 each). Please reverse one.</div>"),
     ("Damaged packaging - Assam CTC 1kg", "Quality", ["damaged"], "Problem",
      "<p>The pouch was torn on arrival. Photos attached.</p>"),
     ("Bulk pricing for 50 kg monthly", "Sales", ["wholesale"], "Question",
@@ -109,7 +110,9 @@ for i in range(36):
         "company_id": contact["company_id"],
         "created_at": iso(created),
         "updated_at": iso(updated),
-        "due_by": iso(created + timedelta(days=3)),
+        # active tickets get a realistic spread of SLA positions; closed ones keep their original due date
+        "due_by": iso(NOW + timedelta(hours=[-30, -2, 3, 20, 60][i % 5]) if status not in (4, 5)
+                      else created + timedelta(days=3)),
         "fr_due_by": iso(created + timedelta(hours=8)),
         "is_escalated": priority == 4,
         "custom_fields": {"cf_order_id": f"KL-{n}", "cf_channel": "website"},
@@ -136,6 +139,13 @@ for i in range(36):
             "created_at": iso(created + timedelta(hours=20)),
             "attachments": ([{"name": "photo.jpg", "content_type": "image/jpeg", "size": 182311}]
                             if "damaged" in tags else []),
+        })
+    if "refund" in tags and tid != 37:
+        convs.append({
+            "id": tid * 100 + 4, "incoming": False, "private": False, "user_id": 9001,
+            "body": f"<p>Refund initiated via Razorpay: rfnd_KL{n}RrSsTtU. Banks take 5-7 working days.</p>",
+            "body_text": f"Refund initiated via Razorpay: rfnd_KL{n}RrSsTtU. Banks take 5-7 working days.",
+            "created_at": iso(created + timedelta(hours=26)), "attachments": [],
         })
     # one long thread to exercise conversation pagination
     if tid == 5:
