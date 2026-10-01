@@ -8,9 +8,10 @@ flowchart LR
     LB --> R1[connector replica 1]
     LB --> R2[connector replica N]
     subgraph replica [each replica - stateless]
-      AUTH[Token verifier<br/>token → tenant] --> TOOLS[10 read-only MCP tools]
+      AUTH[Token verifier<br/>token → tenant] --> TOOLS[11 read-only MCP tools<br/>+ 2 prompts]
       TOOLS --> SVC[FreshdeskService<br/>per tenant]
       SVC --> GR[Normaliser + guardrails<br/>enum mapping · HTML→text · injection flags<br/>private-note policy · PII mask · size budget]
+      SVC --> SIG[Payment-aware signals<br/>Razorpay refs · UTR/ARN · intent · SLA]
       SVC --> CL[FreshdeskClient<br/>credit budget · Retry-After · backoff]
     end
     R1 & R2 -- "atomic Lua: check + reserve credits" --> REDIS[(Redis<br/>budget per Freshdesk domain)]
@@ -33,12 +34,13 @@ One tool call, step by step:
 | Module | Responsibility |
 |---|---|
 | `auth.py` | API-key credentials, `0600` local store, domain validation (SSRF hygiene) |
-| `tenancy.py` | Tenant registry (no secrets inside), hashed bearer tokens, MCP `TokenVerifier` |
+| `tenancy.py` | Tenant registry (no secrets inside), hashed bearer tokens, MCP `TokenVerifier`, hot-reloading `RegistryWatcher` |
 | `ratelimit.py` | Credit budgets: in-memory and Redis (atomic Lua, Redis server time) |
 | `client.py` | HTTP, retries, error mapping, per-call credit accounting |
 | `query.py` | Typed filters → Freshdesk search language (allow-listed characters, 512-char cap) |
 | `service.py` | list/get/search primitives, status catalogue, composite `customer_ticket_history` |
-| `normalize.py` | LLM-shaped records, private-note policy, PII masking |
+| `normalize.py` | LLM-shaped records, private-note policy, PII masking, `signals` + `source_url` |
+| `insights.py` | Payment-aware signals: Razorpay ref / UTR / ARN / amount extraction, explainable intent rules, SLA state |
 | `guardrails.py` | Prompt-injection detector, response size budget, guardrail event tracking |
 | `observability.py` | JSON logs, audit trail, Prometheus registry |
 | `mcp_server.py` | Tool definitions, `_call` wrapper, server factory, `/healthz` `/readyz` `/metrics` |
@@ -60,4 +62,6 @@ One tool call, step by step:
 - **Budget in credits, per Freshdesk domain.** Freshdesk charges `include`s extra and limits per account. Keying the budget by domain means two tenants pointing at the same helpdesk share one budget.
 - **Fail fast rather than queue.** A chat user waiting 60 seconds is worse than an honest "temporarily unavailable". `max_wait` bounds how long any call can hang.
 - **Deterministic guardrails rather than an LLM classifier.** Regex flags are cheap, explainable and testable for false positives. They *flag* rather than *block*, because the merchant still needs to see a suspicious ticket. A model-based classifier can be added later behind the same `content_flags` contract.
+- **Signals by deterministic rules, not an LLM.** Ticket text never leaves the connector for classification. Every intent comes with the phrase that triggered it, and the extractors are fuzzed and tested against false positives (phones, pincodes, GSTINs). An ML classifier can replace the rules later behind the same `signals` contract.
+- **Hot configuration, cold secrets.** The registry (which tokens map to which merchant) reloads on file change. Freshdesk keys are re-read on every call and the client is rebuilt only when a key changes, so rotation and revocation need no restart.
 - **The tenant comes from the token.** Moving the tenant into tool arguments would turn every prompt injection into a cross-merchant data leak.
