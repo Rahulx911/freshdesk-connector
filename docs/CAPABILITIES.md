@@ -25,8 +25,11 @@ The data comes back shaped for an LLM:
 - Status, priority and source are words (`"pending"`), not Freshdesk's numeric codes. Custom statuses (e.g. `waiting_on_customer`) are read from the merchant's own account.
 - HTML bodies are converted to text and capped (2,000 chars by default).
 - Every list result says `has_more` / `next_page`, so the agent knows when it has only part of the data.
-- Private notes are labelled `private_note: true`. The server instructions tell the model never to quote them to the end customer.
-- PII masking (emails and phone numbers) can be switched on with `FRESHDESK_REDACT_PII=true`.
+- **Private notes are withheld by default.** Most Agent Studio agents talk to end customers, and internal notes hold escalation details, phone numbers and "don't refund this one" remarks. The response says how many were withheld (`private_notes_withheld`). An internal support copilot can opt in per merchant (`"private_notes": "include"`); they then come back labelled `private_note: true`, and the server instructions tell the model never to quote them to a customer.
+- **Customer-written text is treated as untrusted.** Ticket subjects, descriptions and customer messages that look like prompt injection ("ignore previous instructions…", fake `<system>` tags, "call the update_ticket tool") come back with `content_flags: ["possible_prompt_injection"]`, and the server instructions tell the model to treat that text as data. The detector is tuned to stay silent on ordinary support language; the tests check both sides.
+- **Responses have a size budget** (60,000 characters by default). Oversized results drop list items from the end and say so (`truncated_for_size`, `conversations_omitted_for_size`), so one giant thread can't flood the agent's context window.
+- Long threads report `conversations_returned`, so the model doesn't have to count messages itself.
+- PII masking (emails and phone numbers) can be switched on per merchant (`"redact_pii": true`) or globally (`FRESHDESK_REDACT_PII=true`).
 
 ## Cannot do (and why)
 
@@ -47,7 +50,7 @@ The data comes back shaped for an LLM:
 Freshdesk limits are **per account per minute**: 50 calls/min on trial plans and up to about 700 on Enterprise. The limit is shared with every other app the merchant has installed. The connector:
 
 1. learns the real limit from the `X-RateLimit-Total` header, and counts *credits* rather than requests (each `include` costs Freshdesk 2 extra credits);
-2. allows itself only 80% of it (`FRESHDESK_RATE_RESERVE=0.2`), so the merchant's other integrations keep working;
+2. allows itself only 80% of it (`FRESHDESK_RATE_RESERVE=0.2`), so the merchant's other integrations keep working. With `REDIS_URL` set, every replica draws from **one** budget per Freshdesk domain (an atomic Redis script), so scaling out never multiplies the load on the merchant's account;
 3. waits client-side when that budget is used up, and honours `Retry-After` on a 429;
 4. never blocks a tool call for more than `FRESHDESK_MAX_WAIT_S` (20s by default). Past that limit it returns
    `{"error": "rate_limited", "retry_after_seconds": 42, "hint": "Wait about 42s …"}`, so the agent can tell the user instead of hanging.
@@ -67,3 +70,4 @@ Every failure is an MCP tool error whose text is JSON:
 | `rate_limited` | Quota exhausted | Wait `retry_after_seconds` |
 | `upstream_unavailable` | Freshdesk down | Retry once later, then tell the user |
 | `not_configured` | No credentials | Run `freshdesk-connector auth login` |
+| `internal_error` | Unexpected connector bug (details only in server logs) | Don't retry; tell the user the lookup failed |

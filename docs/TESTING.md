@@ -1,40 +1,59 @@
 # Testing report
 
-**Result:** 73 automated tests and 21 end-to-end MCP checks, all passing on Python 3.10, 3.11 and 3.13. Line coverage is 91%. GitHub Actions reruns everything on 3.10–3.13 on every push (`.github/workflows/ci.yml`).
+| Check | Result |
+|---|---|
+| Automated tests | **118 passed** on Python 3.10, 3.11 and 3.13 (CI also runs 3.12) |
+| Line coverage | **92%**, including hosted-mode code that runs in subprocesses |
+| End-to-end MCP demo | **21/21** checks |
+| Agent evals (oracle mode) | **15/15** scenarios |
+| Load test, 2 replicas | 2,533 calls in 30 s, **0 errors**, p50 204 ms / p95 399 ms / p99 508 ms |
+| Quota-protection burst | 100 calls against a 50-credit/min account: exactly **40 credits** used (80%), **0 upstream 429s**, the rest failed fast (p95 292 ms) |
+| Compose smoke test | Image build, 2 hardened replicas + Redis + mock, 401 without a token, health/readiness, budget under burst, metrics, no secrets in logs: **passed** |
+| Lint / types / security | `ruff`, `mypy`, `bandit` clean; `pip-audit` on the hash-pinned lockfile: no known vulnerabilities |
 
 ```bash
-pip install -e ".[dev]" pytest-cov
-pytest -q --cov=freshdesk_connector        # 73 tests, ~6s
-python scripts/demo.py                     # end-to-end over MCP, ends with "21/21 checks passed"
-pytest -q -m "not slow"                    # skip the tests that start real servers
+pip install -e ".[dev]"
+pytest -q --cov                          # all tests (+ coverage, subprocesses included)
+pytest -q -m "not slow"                  # skip tests that start servers
+python scripts/demo.py                   # end-to-end over MCP
+python -m evals.run --oracle             # eval dataset vs connector, no LLM
+ANTHROPIC_API_KEY=... python -m evals.run --llm --repeats 3   # Claude drives the tools
+scripts/smoke_compose.sh                 # production shape in Docker
+python scripts/loadtest.py --url http://127.0.0.1:8000 --token $TOKEN --concurrency 20 --duration 30
 ```
 
-## What is tested
+## Test suites
 
-| Layer | File | What it proves |
-|---|---|---|
-| Auth | `test_auth.py`, `test_cli.py` | Domain normalisation and rejection of non-local plain HTTP. Bad keys are refused and never stored. The credential file is mode `0600`. The full login → status → logout flow runs against a live HTTP server. The key never appears in `repr`, status output or logs. |
-| Primitives | `test_primitives.py` | list/get/search for tickets, conversations, contacts and companies. Pagination (`has_more` / `next_page`, no overlap between pages). Input validation. HTML → text. Truncation of long threads. PII masking. |
-| Search safety | `test_primitives.py`, `test_extended.py` | The typed filters build Freshdesk's query string. Injection attempts (`x' OR status:5`, quotes, parentheses, HTML) are rejected **before any request reaches Freshdesk**. |
-| Rate limits | `test_rate_limits.py`, `test_api_conformance.py`, `test_extended.py` | The connector learns the account's limit from headers and keeps a 20% reserve. It honours `Retry-After` on 429s, throttles itself before the server ever sends a 429, and fails fast with a structured `rate_limited` error when the wait would exceed the time budget. It retries on 5xx and gives up after the maximum number of retries. 20 concurrent calls share one budget with zero 429s. It also runs against a real server in real time. |
-| MCP surface | `test_mcp.py`, `test_extended.py`, `test_cli.py` | 10 tools, all `readOnlyHint`. Errors come back as machine-readable JSON with a hint. Tools work over **stdio and streamable HTTP**. The committed `docs/mcp_tool_spec.json` matches what the server actually serves. |
-| End to end | `scripts/demo.py` | Starts a mock Freshdesk, then runs the connector as an MCP stdio server and calls every tool through a real MCP client session, covering normal use, errors and rate limiting. |
+| File | What it proves |
+|---|---|
+| `test_auth.py`, `test_cli.py` | Domain validation (including SSRF cases: IP literals, `.internal`/`.svc` hosts, paths); bad keys never stored; `0600` store; login → status → logout against live HTTP; spec export matches the committed spec |
+| `test_primitives.py` | Every list/get/search primitive, pagination, validation, HTML → text, truncation, PII masking, private-note policy |
+| `test_api_conformance.py` | Behaviour pinned to the official Freshdesk API docs (see below) |
+| `test_rate_limits.py`, `test_extended.py` | 429/`Retry-After`, proactive throttling, fail-fast, 5xx retries, 20 concurrent calls with zero 429s, real wall-clock limits, streamable-HTTP transport, injection inputs never reach Freshdesk, key never logged |
+| `test_production.py` | **Hosted mode:** 401 without or with a wrong token; the token selects the merchant and per-merchant policy; health, readiness and protected metrics; JSON audit log with masked PII and no secrets; registry validation; refuses public HTTP without auth. **Redis:** two replicas share one budget (8 of 8 granted, zero 429s); charges corrected from headers; 100 racing acquires grant exactly the budget. **Guardrails:** 8 attack strings flagged and 10 normal support messages not flagged; flags on ticket and thread; response size budget; stale quota observations expire |
+| `test_evals.py` | Oracle run passes; the agent loop and scorer driven by a scripted model (correct run passes; wrong tool and leaked private note are caught; tool errors reach the model) |
 
 ## Checked against the real Freshdesk API docs
 
-The mock only proves the code matches my own understanding of Freshdesk. So on 2026-10-01 I compared the connector with the official API v2 reference (developers.freshdesk.com/api). That found **four real problems**, now fixed and each covered by a test in `test_api_conformance.py`:
+The mock only proves the code matches my reading of Freshdesk, so I checked the connector against the official API v2 reference. That found four problems, all fixed and pinned by `test_api_conformance.py`:
 
-| # | What the docs say | Problem before | Fix |
-|---|---|---|---|
-| 1 | Rate-limit headers are decimals: `X-Ratelimit-Total: 700.0` | **Bug:** the headers were parsed as integers, so the connector never learned the real limit and stayed at the conservative default. | Parse as numbers with decimals; test uses the docs' exact example. |
-| 2 | "Each include will consume an additional 2 credits"; including conversations costs 2 in total | The throttle counted every request as 1 credit, but `get_ticket` actually costs 5–6, so it could overspend the budget. | The budget now counts credits, predicts the cost from `include`, and corrects it from `X-RateLimit-Used-CurrentRequest`. |
-| 3 | Statuses 2–5 are standard; others such as "Waiting on Customer" (6) are configured per account | 6 and 7 were hard-coded as if they were standard, which would mislabel tickets on other accounts. | Statuses are read from the account's `/api/v2/ticket_fields`. If that fails, it falls back to 2–5 and shows unknown ones as `status_<id>` rather than guessing. |
-| 4 | Search `:>` / `:<` are "greater/less than **or equal to**"; `null` matches empty fields | Date bounds were documented as exclusive. There was no way to find unassigned tickets. | Date bounds are now documented as inclusive (the mock matches), and there's a new `unassigned` filter (`agent_id:null`). |
+1. **Decimal rate-limit headers** (`X-Ratelimit-Total: 700.0`) were parsed as integers. The connector never learned the real limit.
+2. **`include` costs 2 extra credits.** The budget counted requests, not credits. It now predicts the cost and corrects it from `X-RateLimit-Used-CurrentRequest`.
+3. **Statuses 6+ are configured per account.** They're now loaded from `/ticket_fields`, with a fallback that labels unknown ones `status_<id>` rather than guessing.
+4. **Search `:>` / `:<` include the boundary date**, and `null` matches empty fields. Docs and tests now say inclusive, and there's a new `unassigned` filter.
 
-Other documented behaviour the tests also pin down: the 30-day default window for listing tickets, at most 100 per page, search returning 30 per page for at most 10 pages, the 512-character query limit, contact phone/mobile filters matching the exact stored value (the connector tries common Indian number formats), `{"companies": [...]}` as the response shape of company autocomplete, and Basic auth in the form `key:X`.
+Also pinned: the 30-day default list window, 100 per page, search at 30 per page for 10 pages, the 512-character query cap, exact-match phone filters, the shape of the company autocomplete response, and Basic auth `key:X`.
 
-## Not tested, and why
+## Bugs found by testing
 
-- **A real Freshdesk account.** No live account was available. Creating one needs the merchant's sign-up, so it wasn't done here. Run `FRESHDESK_DOMAIN=... FRESHDESK_API_KEY=... python scripts/demo.py --live` against a free trial account; it is read-only. Steps that rely on mock-only data are skipped in `--live` mode.
-- **An LLM driving the tools.** The tests exercise the MCP contract directly. Testing a model's tool choices needs an eval set of merchant questions with expected tool calls (README → Long-term).
-- **Load beyond one process.** Rate-limit state is per process, so a multi-replica deployment needs a shared budget (README → Long-term).
+- **The quota back-off never expired.** A low "remaining" reading from Freshdesk kept forcing waits forever once traffic stopped. Found when the client started rechecking its budget after sleeping; fixed by expiring observations after one window (`test_stale_remaining_does_not_block_forever`).
+- **The published tool spec was stale** after behaviour changes. The CLI test now fails whenever `docs/mcp_tool_spec.json` drifts.
+- **Python 3.13 changed tool descriptions.** 3.13 strips docstring indentation, so the model saw different text depending on the Python version. Descriptions are now normalised.
+- **The model would have had to count thread messages itself.** The eval oracle showed "how many messages?" wasn't directly answerable; `get_ticket` now returns `conversations_returned`.
+- **The compose stack would have refused to start.** The mock host is plain HTTP and the connector correctly rejected it; there's now an explicit, test-only allowlist (`FRESHDESK_INSECURE_HTTP_HOSTS`).
+
+## Not covered, and why
+
+- **A live Freshdesk account.** Creating one needs the merchant's sign-up. `scripts/demo.py --live` is read-only and ready for a trial account.
+- **LLM-mode evals with a real model.** No API key in this environment. The harness and scorer are tested with a scripted model, and the CI job runs `--llm --repeats 3` automatically once an `ANTHROPIC_API_KEY` secret is added.
+- **Container base image locally.** Public registries are blocked in the build sandbox, so the local image test used a stand-in base. The CI `container` job builds from `python:3.12-slim` and runs the same smoke test.
