@@ -12,7 +12,7 @@ Questions I'd ask:
 - What's the Freshdesk plan (rate limit), how many agents, and what other integrations share the quota?
 - What must never happen? For example: promising refunds, quoting internal notes, or answering for the wrong customer.
 
-The data pull: 2–4 weeks of tickets via `search_tickets` / `list_tickets`, read-only, with this connector. Then classify by intent to size each bucket.
+The data pull: run `support_pulse` and 2–4 weeks of `search_tickets` / `list_tickets`, read-only, with this connector. `signals.intent` sizes each bucket on day one, and the share of payment-related tickets that already carry Razorpay ids tells you how much can be auto-resolved.
 
 ## 2. Baseline metrics (before the agent)
 
@@ -37,7 +37,7 @@ The data pull: 2–4 weeks of tickets via `search_tickets` / `list_tickets`, rea
 
 ## 5. What I'd build next for a Razorpay merchant
 
-1. **Join helpdesk and payment data.** A Razorpay Payments/Refunds connector, so "where's my refund?" is answered from the source of truth (refund status, ARN/UTR) rather than from what a support agent last typed into a ticket. This is the step that turns ticket lookup into actual resolution.
+1. **Close the loop with Razorpay data.** The connector already pulls `pay_` / `rfnd_` / `sub_` ids, UTRs and ARNs out of every ticket and thread (`signals.payment_refs`). Paired with Razorpay's Payments/Refunds tools in Agent Studio, "where's my refund?" becomes a fully grounded, automatic answer: refund status, ARN for the bank and expected credit date. This is the step that turns ticket lookup into resolution, and it's where I'd measure deflection first.
 2. **Write tools behind approval.** `add_private_note` (the agent's summary for humans) first, then `reply_to_ticket` with a human approving each send in Agent Studio. Each is its own scope and audited.
 3. **Events instead of polling.** A Freshdesk automation webhook on "ticket created" triggers the agent to draft a reply before a human opens the ticket.
 

@@ -2,10 +2,10 @@
 
 | Check | Result |
 |---|---|
-| Automated tests | **118 passed** on Python 3.10, 3.11 and 3.13 (CI also runs 3.12) |
-| Line coverage | **92%**, including hosted-mode code that runs in subprocesses |
-| End-to-end MCP demo | **21/21** checks |
-| Agent evals (oracle mode) | **15/15** scenarios |
+| Automated tests | **160 passed** on Python 3.10, 3.11 and 3.13 (CI also runs 3.12), including property-based fuzzing (Hypothesis, 400 generated cases per property) |
+| Line coverage | **93%**, including hosted-mode code that runs in subprocesses |
+| End-to-end MCP demo | **24/24** checks |
+| Agent evals (oracle mode) | **19/19** scenarios (incl. payments and triage) |
 | Load test, 2 replicas | 2,533 calls in 30 s, **0 errors**, p50 204 ms / p95 399 ms / p99 508 ms |
 | Quota-protection burst | 100 calls against a 50-credit/min account: exactly **40 credits** used (80%), **0 upstream 429s**, the rest failed fast (p95 292 ms) |
 | Compose smoke test | Image build, 2 hardened replicas + Redis + mock, 401 without a token, health/readiness, budget under burst, metrics, no secrets in logs: **passed** |
@@ -31,6 +31,8 @@ python scripts/loadtest.py --url http://127.0.0.1:8000 --token $TOKEN --concurre
 | `test_api_conformance.py` | Behaviour pinned to the official Freshdesk API docs (see below) |
 | `test_rate_limits.py`, `test_extended.py` | 429/`Retry-After`, proactive throttling, fail-fast, 5xx retries, 20 concurrent calls with zero 429s, real wall-clock limits, streamable-HTTP transport, injection inputs never reach Freshdesk, key never logged |
 | `test_production.py` | **Hosted mode:** 401 without or with a wrong token; the token selects the merchant and per-merchant policy; health, readiness and protected metrics; JSON audit log with masked PII and no secrets; registry validation; refuses public HTTP without auth. **Redis:** two replicas share one budget (8 of 8 granted, zero 429s); charges corrected from headers; 100 racing acquires grant exactly the budget. **Guardrails:** 8 attack strings flagged and 10 normal support messages not flagged; flags on ticket and thread; response size budget; stale quota observations expire |
+| `test_signals.py` | Razorpay ref / UTR / ARN / amount extraction with a false-positive corpus (phones, pincodes, GSTINs, wrong-length ids); intent rules; SLA states; refs collected across the thread; `support_pulse` ranking, reasons and credit cost; status-cache TTL, single-flight and transient-error handling; HTML noise stripping; strict size budget; registry hot-reload and revocation; broken edits keep the last good registry; key rotation without restart; per-tenant readiness |
+| `test_fuzz.py` | Properties: any accepted search tag compiles to exactly one tag clause (no smuggled operators); HTML conversion leaves no tags; every email is masked; detectors never crash; size budget always holds |
 | `test_evals.py` | Oracle run passes; the agent loop and scorer driven by a scripted model (correct run passes; wrong tool and leaked private note are caught; tool errors reach the model) |
 
 ## Checked against the real Freshdesk API docs
@@ -51,6 +53,18 @@ Also pinned: the 30-day default list window, 100 per page, search at 30 per page
 - **Python 3.13 changed tool descriptions.** 3.13 strips docstring indentation, so the model saw different text depending on the Python version. Descriptions are now normalised.
 - **The model would have had to count thread messages itself.** The eval oracle showed "how many messages?" wasn't directly answerable; `get_ticket` now returns `conversations_returned`.
 - **The compose stack would have refused to start.** The mock host is plain HTTP and the connector correctly rejected it; there's now an explicit, test-only allowlist (`FRESHDESK_INSECURE_HTTP_HOSTS`).
+
+## Second audit (line-by-line review + fuzzing)
+
+| Finding | Impact | Fix | Test |
+|---|---|---|---|
+| A transient error (rate limit, Freshdesk blip) while loading custom statuses pinned the defaults **forever** | "waiting_on_customer" tickets mislabelled until restart | Transient errors aren't cached; 1-hour TTL; single-flight lock | `test_transient_error_does_not_pin_default_statuses`, `test_status_catalogue_ttl_and_single_flight` |
+| **Email masking leaked part of addresses** with characters like `'` or `!` before the `@` (`o'b***@…`) | PII in audit logs / redacted output | Full RFC 5322 local-part character set | Found by `test_fuzz.py`; regression in `test_mask_pii_regressions` |
+| One merchant's missing key made `/readyz` fail the whole replica | One bad config takes every merchant offline | Readiness degraded per tenant | `test_key_rotation_rebuilds_client_and_readiness_is_per_tenant` |
+| Rotated Freshdesk keys weren't picked up until restart | `auth_failed` after a routine rotation | Credentials re-read per call; client rebuilt when the key changes | same |
+| Token revocation needed a redeploy | Slow incident response | Registry hot-reload (~5 s), last-good on broken edits | `test_registry_hot_reload_*`, `test_broken_registry_edit_keeps_last_good` |
+| `<style>`, `<script>` and comment contents leaked into ticket text | Junk and possible hidden instructions in the model context | Stripped before conversion | `test_html_noise_removed` |
+| Size budget re-serialised the response per dropped item (O(n²)) and could overshoot by the marker size | Latency on huge threads; budget off by ~60 chars | Binary search with a margin for markers | `test_size_budget_is_strict_and_fast`, fuzz property |
 
 ## Not covered, and why
 
