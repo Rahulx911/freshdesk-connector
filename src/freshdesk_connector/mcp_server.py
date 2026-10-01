@@ -33,7 +33,8 @@ How to use:
   then get_ticket(id) for the one that matters.
 - Filtering by status/priority/tag/date -> search_tickets (structured filters, max 300 results).
 - Browsing recent activity -> list_tickets(updated_since=...).
-- Statuses: open, pending, resolved, closed, waiting_on_customer, waiting_on_third_party.
+- Statuses: open, pending, resolved, closed, plus the account's custom statuses
+  (connector_status lists them).
 - Priorities: low, medium, high, urgent.
 
 Limits: cannot create, reply to, update or delete anything. Cannot full-text
@@ -83,9 +84,7 @@ async def _call(coro_fn, *args, **kwargs):
         raise ToolError(json.dumps(e.to_dict())) from e
 
 
-Status = Literal["open", "pending", "resolved", "closed", "waiting_on_customer", "waiting_on_third_party"]
 Priority = Literal["low", "medium", "high", "urgent"]
-IsoDate = Annotated[str | None, Field(description="ISO date YYYY-MM-DD", default=None)]
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -108,24 +107,27 @@ async def list_tickets(
 
 @mcp.tool(annotations=READ_ONLY)
 async def search_tickets(
-    status: Annotated[list[Status] | None, Field(description="Match any of these statuses")] = None,
+    status: Annotated[list[str] | None, Field(description="Match any of these statuses: open, pending, resolved, closed, plus any custom statuses the account defines (e.g. waiting_on_customer); connector_status lists them")] = None,
     priority: Annotated[list[Priority] | None, Field(description="Match any of these priorities")] = None,
     tags: Annotated[list[str] | None, Field(description="Match any of these tags")] = None,
     ticket_type: Annotated[str | None, Field(description="Ticket type, e.g. 'Refund', 'Question'")] = None,
     agent_id: Annotated[int | None, Field(description="Assigned agent id")] = None,
+    unassigned: Annotated[bool, Field(description="Only tickets with no agent assigned")] = False,
     group_id: Annotated[int | None, Field(description="Assigned group id")] = None,
-    created_after: IsoDate = None,
-    created_before: IsoDate = None,
-    updated_after: IsoDate = None,
-    updated_before: IsoDate = None,
-    due_before: IsoDate = None,
+    created_after: Annotated[str | None, Field(description="YYYY-MM-DD, inclusive (on or after)")] = None,
+    created_before: Annotated[str | None, Field(description="YYYY-MM-DD, inclusive (on or before)")] = None,
+    updated_after: Annotated[str | None, Field(description="YYYY-MM-DD, inclusive")] = None,
+    updated_before: Annotated[str | None, Field(description="YYYY-MM-DD, inclusive")] = None,
+    due_before: Annotated[str | None, Field(description="YYYY-MM-DD, inclusive")] = None,
     page: Annotated[int, Field(ge=1, le=10, description="30 results per page, max 10 pages")] = 1,
 ) -> dict:
     """Search tickets by structured filters (AND across fields, OR within a list).
-    Returns total_matches. Does NOT search subject/description text."""
+    Returns total_matches. Does NOT search subject/description text, skips archived
+    tickets, and very recent changes can take a few minutes to become searchable."""
     svc = get_service()
     return await _call(svc.search_tickets, status=status, priority=priority, tags=tags,
-                       ticket_type=ticket_type, agent_id=agent_id, group_id=group_id,
+                       ticket_type=ticket_type, agent_id=agent_id, unassigned=unassigned,
+                       group_id=group_id,
                        created_after=created_after, created_before=created_before,
                        updated_after=updated_after, updated_before=updated_before,
                        due_before=due_before, page=page)
@@ -204,6 +206,18 @@ async def connector_status() -> dict:
     """Check the connection: which Freshdesk account and agent identity is in use,
     access level, PII redaction, and current rate-limit headroom."""
     return await _call(get_service().connector_status)
+
+
+def _normalise_descriptions() -> None:
+    """Python 3.13+ strips docstring indentation at compile time; older versions don't.
+    Clean them here so every Python serves the model byte-identical tool text."""
+    import inspect
+    for tool in mcp._tool_manager.list_tools():
+        if tool.description:
+            tool.description = inspect.cleandoc(tool.description)
+
+
+_normalise_descriptions()
 
 
 def run(transport: str = "stdio") -> None:
