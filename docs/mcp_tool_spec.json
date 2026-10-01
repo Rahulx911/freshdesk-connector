@@ -1,12 +1,12 @@
 {
   "server": {
     "name": "freshdesk",
-    "instructions": "Read-only access to the merchant's Freshdesk helpdesk: tickets, ticket\nconversations, contacts (customers) and companies.\n\nHow to use:\n- Customer asks \"what's happening with my issue?\" -> customer_ticket_history(email)\n  then get_ticket(id) for the one that matters.\n- Filtering by status/priority/tag/date -> search_tickets (structured filters, max 300 results).\n- Browsing recent activity -> list_tickets(updated_since=...).\n- Statuses: open, pending, resolved, closed, waiting_on_customer, waiting_on_third_party.\n- Priorities: low, medium, high, urgent.\n\nLimits: cannot create, reply to, update or delete anything. Cannot full-text\nsearch ticket bodies. If a tool returns error=rate_limited, wait\nretry_after_seconds before calling ANY Freshdesk tool again. Private notes are\ninternal agent notes (private_note=true): never quote them to the end customer.\n"
+    "instructions": "Read-only access to the merchant's Freshdesk helpdesk: tickets, ticket\nconversations, contacts (customers) and companies.\n\nHow to use:\n- Customer asks \"what's happening with my issue?\" -> customer_ticket_history(email)\n  then get_ticket(id) for the one that matters.\n- Filtering by status/priority/tag/date -> search_tickets (structured filters, max 300 results).\n- Browsing recent activity -> list_tickets(updated_since=...).\n- Statuses: open, pending, resolved, closed, plus the account's custom statuses\n  (connector_status lists them).\n- Priorities: low, medium, high, urgent.\n\nLimits: cannot create, reply to, update or delete anything. Cannot full-text\nsearch ticket bodies. If a tool returns error=rate_limited, wait\nretry_after_seconds before calling ANY Freshdesk tool again. Private notes are\ninternal agent notes (private_note=true): never quote them to the end customer.\n"
   },
   "tools": [
     {
       "name": "list_tickets",
-      "description": "List tickets, newest activity first. Use for browsing recent tickets or a\n    customer's/company's tickets. For status/priority/tag filters use search_tickets.",
+      "description": "List tickets, newest activity first. Use for browsing recent tickets or a\ncustomer's/company's tickets. For status/priority/tag filters use search_tickets.",
       "inputSchema": {
         "properties": {
           "updated_since": {
@@ -94,21 +94,13 @@
     },
     {
       "name": "search_tickets",
-      "description": "Search tickets by structured filters (AND across fields, OR within a list).\n    Returns total_matches. Does NOT search subject/description text.",
+      "description": "Search tickets by structured filters (AND across fields, OR within a list).\nReturns total_matches. Does NOT search subject/description text, skips archived\ntickets, and very recent changes can take a few minutes to become searchable.",
       "inputSchema": {
         "properties": {
           "status": {
             "anyOf": [
               {
                 "items": {
-                  "enum": [
-                    "open",
-                    "pending",
-                    "resolved",
-                    "closed",
-                    "waiting_on_customer",
-                    "waiting_on_third_party"
-                  ],
                   "type": "string"
                 },
                 "type": "array"
@@ -118,7 +110,7 @@
               }
             ],
             "default": null,
-            "description": "Match any of these statuses",
+            "description": "Match any of these statuses: open, pending, resolved, closed, plus any custom statuses the account defines (e.g. waiting_on_customer); connector_status lists them",
             "title": "Status"
           },
           "priority": {
@@ -185,6 +177,12 @@
             "description": "Assigned agent id",
             "title": "Agent Id"
           },
+          "unassigned": {
+            "default": false,
+            "description": "Only tickets with no agent assigned",
+            "title": "Unassigned",
+            "type": "boolean"
+          },
           "group_id": {
             "anyOf": [
               {
@@ -208,7 +206,7 @@
               }
             ],
             "default": null,
-            "description": "ISO date YYYY-MM-DD",
+            "description": "YYYY-MM-DD, inclusive (on or after)",
             "title": "Created After"
           },
           "created_before": {
@@ -221,7 +219,7 @@
               }
             ],
             "default": null,
-            "description": "ISO date YYYY-MM-DD",
+            "description": "YYYY-MM-DD, inclusive (on or before)",
             "title": "Created Before"
           },
           "updated_after": {
@@ -234,7 +232,7 @@
               }
             ],
             "default": null,
-            "description": "ISO date YYYY-MM-DD",
+            "description": "YYYY-MM-DD, inclusive",
             "title": "Updated After"
           },
           "updated_before": {
@@ -247,7 +245,7 @@
               }
             ],
             "default": null,
-            "description": "ISO date YYYY-MM-DD",
+            "description": "YYYY-MM-DD, inclusive",
             "title": "Updated Before"
           },
           "due_before": {
@@ -260,7 +258,7 @@
               }
             ],
             "default": null,
-            "description": "ISO date YYYY-MM-DD",
+            "description": "YYYY-MM-DD, inclusive",
             "title": "Due Before"
           },
           "page": {
@@ -284,7 +282,7 @@
     },
     {
       "name": "get_ticket",
-      "description": "Get one ticket with description, requester, SLA stats and its conversation\n    thread (customer replies, agent replies and private notes).",
+      "description": "Get one ticket with description, requester, SLA stats and its conversation\nthread (customer replies, agent replies and private notes).",
       "inputSchema": {
         "properties": {
           "ticket_id": {
@@ -320,7 +318,7 @@
     },
     {
       "name": "list_ticket_conversations",
-      "description": "Page through a long ticket thread oldest-first (use after get_ticket reports\n    conversations_truncated=true).",
+      "description": "Page through a long ticket thread oldest-first (use after get_ticket reports\nconversations_truncated=true).",
       "inputSchema": {
         "properties": {
           "ticket_id": {
@@ -443,7 +441,7 @@
     },
     {
       "name": "customer_ticket_history",
-      "description": "One call for 'who is this customer and what have they raised?': the contact\n    record plus their most recently updated tickets and a count by status.",
+      "description": "One call for 'who is this customer and what have they raised?': the contact\nrecord plus their most recently updated tickets and a count by status.",
       "inputSchema": {
         "properties": {
           "email": {
@@ -529,7 +527,7 @@
     },
     {
       "name": "connector_status",
-      "description": "Check the connection: which Freshdesk account and agent identity is in use,\n    access level, PII redaction, and current rate-limit headroom.",
+      "description": "Check the connection: which Freshdesk account and agent identity is in use,\naccess level, PII redaction, and current rate-limit headroom.",
       "inputSchema": {
         "properties": {},
         "title": "connector_statusArguments",

@@ -14,6 +14,7 @@ It **cannot change anything**. It can't reply to customers, update tickets, add 
 |---|---|
 | "What's the status of my complaint?" (customer gives email) | `customer_ticket_history` → `get_ticket` |
 | "Show urgent open tickets about refunds this week" | `search_tickets(status=[open], priority=[urgent], tags=[refund], created_after=…)` |
+| "Which tickets nobody has picked up?" | `search_tickets(status=[open], unassigned=true)` |
 | "What has changed since this morning?" | `list_tickets(updated_since=…)` |
 | "Summarise the conversation on ticket 4512" | `get_ticket(4512)`, then `list_ticket_conversations` if `conversations_truncated` |
 | "Who is +91 98xxxxxx21?" | `find_contacts(phone=…)` |
@@ -21,7 +22,7 @@ It **cannot change anything**. It can't reply to customers, update tickets, add 
 | "Is the connector working / whose access is it using?" | `connector_status` |
 
 The data comes back shaped for an LLM:
-- Status, priority and source are words (`"pending"`), not Freshdesk's numeric codes.
+- Status, priority and source are words (`"pending"`), not Freshdesk's numeric codes. Custom statuses (e.g. `waiting_on_customer`) are read from the merchant's own account.
 - HTML bodies are converted to text and capped (2,000 chars by default).
 - Every list result says `has_more` / `next_page`, so the agent knows when it has only part of the data.
 - Private notes are labelled `private_note: true`. The server instructions tell the model never to quote them to the end customer.
@@ -33,6 +34,7 @@ The data comes back shaped for an LLM:
 |---|---|---|
 | Write anything: reply, update status, add a note, assign | Out of scope by design. Read-only is the safe default for a first deployment. | Add write tools later behind human approval (see README, "Long-term"). |
 | Full-text search of ticket subjects or bodies ("tickets mentioning 'courier'") | Freshdesk's search API filters on fields only; it has no keyword search. | Filter by tag, type or date, then let the model scan the results. |
+| See archived tickets, or changes made in the last few minutes, via search | Freshdesk search excludes archived tickets and indexes with a short delay. | Use `get_ticket` by id, or `list_tickets(updated_since=…)`. |
 | See more than 300 search results for one query | Freshdesk caps search at 10 pages × 30. | The tool returns `total_matches` and a warning; narrow the query with date ranges. |
 | See tickets older than 30 days with a plain `list_tickets` | That's Freshdesk's default list window. | Pass `updated_since`. The tool response includes a reminder note. |
 | See tickets the API key's agent can't see | Freshdesk applies the agent's role and group scopes to the key. | Use a key belonging to an agent with "all tickets" scope, ideally a dedicated integration agent. |
@@ -44,7 +46,7 @@ The data comes back shaped for an LLM:
 
 Freshdesk limits are **per account per minute**: 50 calls/min on trial plans and up to about 700 on Enterprise. The limit is shared with every other app the merchant has installed. The connector:
 
-1. learns the real limit from the `X-RateLimit-Total` header;
+1. learns the real limit from the `X-RateLimit-Total` header, and counts *credits* rather than requests (each `include` costs Freshdesk 2 extra credits);
 2. allows itself only 80% of it (`FRESHDESK_RATE_RESERVE=0.2`), so the merchant's other integrations keep working;
 3. waits client-side when that budget is used up, and honours `Retry-After` on a 429;
 4. never blocks a tool call for more than `FRESHDESK_MAX_WAIT_S` (20s by default). Past that limit it returns
