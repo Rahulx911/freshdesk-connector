@@ -37,7 +37,8 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
     """external_usage: requests already spent this minute by the merchant's *other*
     integrations (Freshdesk quotas are per account, shared by every app)."""
     limit = rate_limit_per_min or int(os.environ.get("MOCK_RATE_LIMIT", "100"))
-    state = {"hits": deque([clock()] * external_usage), "fails_left": fail_first_n, "requests": 0}
+    state = {"hits": deque([clock()] * external_usage), "fails_left": fail_first_n, "requests": 0,
+             "deny_ticket_fields": False}
     app = FastAPI(title="Mock Freshdesk")
     app.state.mock = state
 
@@ -59,21 +60,23 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
         hits = state["hits"]
         while hits and now - hits[0] >= 60:
             hits.popleft()
-        if len(hits) >= limit:
-            retry = max(1, int(60 - (now - hits[0])) + 1)
+        cost = request_cost(request)
+        if len(hits) + cost > limit:
+            retry = max(1, int(60 - (now - hits[0])) + 1) if hits else 60
             return JSONResponse({"message": "Rate limit exceeded"}, status_code=429,
-                                headers={"Retry-After": str(retry), "X-RateLimit-Total": str(limit),
-                                         "X-RateLimit-Remaining": "0"})
-        hits.append(now)
+                                headers={"Retry-After": str(retry), "X-RateLimit-Total": f"{limit}.0",
+                                         "X-RateLimit-Remaining": "0.0"})
+        hits.extend([now] * cost)
 
         if state["fails_left"] > 0:
             state["fails_left"] -= 1
             return JSONResponse({"message": "Service Unavailable"}, status_code=503)
 
         resp = await call_next(request)
-        resp.headers["X-RateLimit-Total"] = str(limit)
-        resp.headers["X-RateLimit-Remaining"] = str(max(0, limit - len(hits)))
-        resp.headers["X-RateLimit-Used-CurrentRequest"] = "1"
+        # Real Freshdesk sends these as decimals, e.g. "700.0" (see API docs, Rate Limit section)
+        resp.headers["X-RateLimit-Total"] = f"{limit}.0"
+        resp.headers["X-RateLimit-Remaining"] = f"{max(0, limit - len(hits))}.0"
+        resp.headers["X-RateLimit-Used-CurrentRequest"] = str(cost)
         return resp
 
     def paginate(request: Request, items: list):
@@ -97,6 +100,17 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
             q = "&".join(f"{k}={v}" for k, v in qp.items())
             headers["Link"] = f'<{request.url.path}?{q}>; rel="next"'
         return JSONResponse(chunk, headers=headers)
+
+    @app.get("/api/v2/ticket_fields")
+    async def ticket_fields():
+        if state.get("deny_ticket_fields"):
+            return JSONResponse({"code": "access_denied", "message": "You are not authorized"}, status_code=403)
+        return [
+            {"id": 4, "name": "source", "type": "default_source",
+             "choices": {"Email": 1, "Portal": 2, "Phone": 3, "Chat": 7, "Feedback Widget": 9}},
+            {"id": 5, "name": "status", "type": "default_status", "label": "Status",
+             "choices": {k: [v, v] for k, v in D.STATUS_CHOICES.items()}},
+        ]
 
     @app.get("/api/v2/agents/me")
     async def me():
@@ -170,8 +184,8 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
             items = [c for c in items if c["email"] == qp["email"].lower()]
         for f in ("phone", "mobile"):
             if f in qp:
-                want = re.sub(r"\D", "", qp[f])
-                items = [c for c in items if c.get(f) and re.sub(r"\D", "", c[f]).endswith(want[-10:])]
+                # Freshdesk matches the number exactly as it was stored
+                items = [c for c in items if c.get(f) == qp[f]]
         return paginate(request, items)
 
     @app.get("/api/v2/contacts/autocomplete")
@@ -197,8 +211,15 @@ def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API
     return app
 
 
+def request_cost(request: Request) -> int:
+    """API credits a call consumes. Docs: each `include` costs 2 extra credits
+    (include=stats -> 3 total); include=conversations on a ticket costs 2 total."""
+    inc = [x for x in request.query_params.get("include", "").split(",") if x]
+    return 1 + sum(1 if x == "conversations" else 2 for x in inc)
+
+
 # ---------------------------------------------------------- query language
-_TERM_RE = re.compile(r"^(\w+):(>|<)?(?:'([^']*)'|(\d+))$")
+_TERM_RE = re.compile(r"^(\w+):(>|<)?(?:'([^']*)'|(\d+)|(null))$")
 _FIELD_MAP = {"agent_id": "responder_id", "tag": "tags"}
 _DATE_FIELDS = {"created_at", "updated_at", "due_by", "fr_due_by"}
 
@@ -207,13 +228,16 @@ def _term(expr: str):
     m = _TERM_RE.match(expr.strip())
     if not m:
         raise ValueError(f"Invalid term: {expr!r}")
-    field, op, sval, nval = m.groups()
+    field, op, sval, nval, null = m.groups()
     key = _FIELD_MAP.get(field, field)
+    if null:
+        return (lambda t: not t["tags"]) if key == "tags" else (lambda t: t.get(key) is None)
     if field in _DATE_FIELDS:
         if not op or sval is None:
             raise ValueError(f"{field} needs :> or :< with a quoted date")
         bound = sval[:10]
-        return (lambda t: t[key][:10] > bound) if op == ">" else (lambda t: t[key][:10] < bound)
+        # Freshdesk: ":>" is greater-than-OR-EQUAL, ":<" is less-than-OR-EQUAL
+        return (lambda t: t[key][:10] >= bound) if op == ">" else (lambda t: t[key][:10] <= bound)
     val = int(nval) if nval is not None else sval
     if key == "tags":
         return lambda t: val in t["tags"]

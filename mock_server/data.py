@@ -13,6 +13,10 @@ def iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Account-configured statuses: 2-5 are Freshdesk defaults, 6+ are custom per account.
+STATUS_CHOICES = {"2": "Open", "3": "Pending", "4": "Resolved", "5": "Closed",
+                  "6": "Waiting on Customer", "7": "Waiting on Third Party"}
+
 AGENT_ME = {
     "id": 9001,
     "available": True,
@@ -41,6 +45,7 @@ _NAMES = [
     ("Vikram Shah", "vikram.shah@example.com", None, None),
     ("Neha Kulkarni", "neha@bloomhotels.example", "+91 90000 00007", 503),
     ("Arjun Mehta", "arjun.mehta@example.com", "+91 90000 00008", None),
+    ("Divya Menon", "divya.menon@example.com", "9876543210", None),   # stored without country code
 ]
 CONTACTS = []
 for i, (name, email, phone, company) in enumerate(_NAMES):
