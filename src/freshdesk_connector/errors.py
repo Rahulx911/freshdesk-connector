@@ -4,6 +4,8 @@ ask the user for a valid id, re-authenticate) instead of a stack trace."""
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class FreshdeskError(Exception):
     code = "freshdesk_error"
@@ -16,7 +18,7 @@ class FreshdeskError(Exception):
         self.details = details
 
     def to_dict(self) -> dict:
-        out = {"error": self.code, "message": self.message, "hint": self.hint}
+        out: dict[str, Any] = {"error": self.code, "message": self.message, "hint": self.hint}
         if self.status is not None:
             out["http_status"] = self.status
         if self.details:

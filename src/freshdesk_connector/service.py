@@ -9,8 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .client import FreshdeskClient
-from .errors import InvalidRequest, NotFound
-from .errors import FreshdeskError
+from .errors import FreshdeskError, InvalidRequest, NotFound
 from .normalize import STATUS, Normalizer, slugify
 from .query import build_ticket_query, iso_or_none
 
@@ -126,7 +125,10 @@ class FreshdeskService:
                 ticket_id, page=1, per_page=min(max(max_conversations, 1), 100)
             )
             out["conversations"] = convs["items"]
+            out["conversations_returned"] = len(convs["items"])   # LLMs miscount long lists
             out["conversations_truncated"] = convs["has_more"]
+            if convs.get("private_notes_withheld"):
+                out["private_notes_withheld"] = convs["private_notes_withheld"]
         return out
 
     async def list_ticket_conversations(self, ticket_id: int, *, page: int = 1, per_page: int = 30) -> dict:
@@ -134,7 +136,11 @@ class FreshdeskService:
         data, has_next = await self.c.get_page(
             f"/api/v2/tickets/{int(ticket_id)}/conversations", {"page": page, "per_page": per_page}
         )
-        return _paged([self.n.conversation(c) for c in data], page, has_next, ticket_id=ticket_id)
+        kept, withheld = self.n.conversations(data)
+        extra: dict[str, Any] = {"ticket_id": ticket_id}
+        if withheld:
+            extra["private_notes_withheld"] = withheld
+        return _paged(kept, page, has_next, **extra)
 
     # --------------------------------------------------------------- contacts
     async def get_contact(self, contact_id: int) -> dict:
@@ -172,7 +178,7 @@ class FreshdeskService:
                 if data:
                     break
         else:
-            if len(name.strip()) < 2:
+            if name is None or len(name.strip()) < 2:
                 raise InvalidRequest("name must be at least 2 characters")
             hits = await self.c.get_json("/api/v2/contacts/autocomplete", {"term": name.strip()})
             data = []
@@ -224,5 +230,6 @@ class FreshdeskService:
             "access": "read-only",
             "ticket_statuses": sorted((await self.statuses()).values()),
             "pii_redaction": self.n.redact_pii,
-            "rate_limit": self.c.rl.snapshot(),
+            "private_notes": "include" if self.n.include_private_notes else "exclude",
+            "rate_limit": await self.c.rl.stats(),
         }
