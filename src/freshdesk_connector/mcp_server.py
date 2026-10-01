@@ -374,7 +374,7 @@ async def connector_status() -> dict:
     return await _call("connector_status", {}, lambda s: s.connector_status())
 
 
-TOOLS = [list_tickets, search_tickets, get_ticket, list_ticket_conversations, find_contacts,
+TOOLS: list[Callable[..., Any]] = [list_tickets, search_tickets, get_ticket, list_ticket_conversations, find_contacts,
          get_contact, customer_ticket_history, get_company, find_companies, connector_status]
 
 
