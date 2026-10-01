@@ -13,7 +13,7 @@ from .auth import Credentials, CredentialStore, normalize_base_url, resolve_cred
 from .client import FreshdeskClient
 from .errors import FreshdeskError
 from .observability import configure_logging
-from .tenancy import TenantRegistry, hash_token, mint_token
+from .tenancy import RegistryWatcher, hash_token, mint_token
 
 
 async def _verify(creds: Credentials) -> Credentials:
@@ -75,7 +75,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     tenants = args.tenants or os.environ.get("FRESHDESK_TENANTS_FILE")
     if tenants:
         try:
-            registry = TenantRegistry.load(tenants)
+            registry = RegistryWatcher(tenants)       # hot-reloads on file change
         except FreshdeskError as e:
             print(f"Cannot start: {e.message}", file=sys.stderr)
             return 2
