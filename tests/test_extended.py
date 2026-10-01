@@ -134,7 +134,7 @@ async def test_streamable_http_transport(live_mock):
         async with streamablehttp_client(f"http://127.0.0.1:{port}/mcp") as (r, w, _), ClientSession(r, w) as s:
             await s.initialize()
             tools = await s.list_tools()
-            assert len(tools.tools) == 10
+            assert len(tools.tools) == 11
             res = await s.call_tool("search_tickets", {"status": ["open"], "priority": ["urgent"]})
             assert not res.isError and "total_matches" in res.content[0].text
             res = await s.call_tool("get_ticket", {"ticket_id": 123456})
