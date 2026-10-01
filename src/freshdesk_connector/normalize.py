@@ -21,10 +21,16 @@ SOURCE = {1: "email", 2: "portal", 3: "phone", 7: "chat", 9: "feedback_widget",
           10: "outbound_email"}
 
 _TAG_RE = re.compile(r"<[^>]+>")
+# HTML emails carry <style>/<script>/<head> blocks and HTML comments whose *contents*
+# would otherwise land in the model's context as junk text.
+_NOISE_RE = re.compile(r"<(style|script|head|title)\b[^>]*>.*?</\1\s*>|<!--.*?-->", re.I | re.S)
 _BLOCK_RE = re.compile(r"</?(p|div|br|li|tr|h\d)[^>]*>", re.I)
 _WS_RE = re.compile(r"[ \t]+")
 _NL_RE = re.compile(r"\n{3,}")
-_EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
+# Local part uses the full RFC 5322 atext set (o'brien@, a!b@, ...): a narrower class
+# would mask only the tail of such addresses and leak the start (found by fuzzing).
+_EMAIL_RE = re.compile(r"([A-Za-z0-9!#$%&'*+/=?^_`{|}~.-])[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]*"
+                       r"(@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})")
 _PHONE_RE = re.compile(r"(?<!\d)(\+?\d[\d\s-]{7,}\d)(?!\d)")
 
 
@@ -35,6 +41,7 @@ def slugify(label: str) -> str:
 def html_to_text(s: str | None) -> str:
     if not s:
         return ""
+    s = _NOISE_RE.sub("", s)
     s = _BLOCK_RE.sub("\n", s)
     s = _TAG_RE.sub("", s)
     s = html.unescape(s)
@@ -55,7 +62,8 @@ def mask_pii(s: str) -> str:
 
 class Normalizer:
     def __init__(self, *, redact_pii: bool = False, max_body_chars: int = 2000,
-                 include_private_notes: bool = False):
+                 include_private_notes: bool = False, portal_url: str | None = None):
+        self.portal_url = portal_url.rstrip("/") if portal_url else None
         self.redact_pii = redact_pii
         self.max_body_chars = max_body_chars
         # Private notes are internal agent chatter (escalations, customer phone numbers,
@@ -85,6 +93,20 @@ class Normalizer:
             return self.status_names.get(sid, f"status_{sid}")
         return sid
 
+    def _signals(self, t: dict, status_name: Any, text: str | None) -> dict:
+        from .insights import classify_intent, extract_payment_refs, sla_state
+        sig: dict[str, Any] = classify_intent(t.get("subject"), text)
+        refs = extract_payment_refs(t.get("subject"), text, custom_fields=t.get("custom_fields"))
+        if refs:
+            sig["payment_refs"] = refs
+        sla = sla_state(t, active=status_name not in ("resolved", "closed"))
+        if sla:
+            sig["sla"] = sla
+        return sig
+
+    def ticket_url(self, ticket_id: Any) -> str | None:
+        return f"{self.portal_url}/a/tickets/{ticket_id}" if self.portal_url and ticket_id else None
+
     def ticket(self, t: dict, *, include_body: bool = False) -> dict:
         out = {
             "id": t.get("id"),
@@ -109,7 +131,12 @@ class Normalizer:
         if include_body or "description_text" in t or "description" in t:
             if t.get("description_text") or t.get("description"):
                 out["description"] = self._body(t.get("description_text"), t.get("description"))
-        self._flag_untrusted(out, t.get("subject"), t.get("description_text") or html_to_text(t.get("description")))
+        full_text = t.get("description_text") or html_to_text(t.get("description"))
+        self._flag_untrusted(out, t.get("subject"), full_text)
+        out["signals"] = self._signals(t, out.get("status"), full_text)
+        url = self.ticket_url(t.get("id"))
+        if url:
+            out["source_url"] = url
         if isinstance(t.get("requester"), dict):
             out["requester"] = self.contact(t["requester"])
         if isinstance(t.get("stats"), dict):
@@ -144,8 +171,13 @@ class Normalizer:
             "created_at": c.get("created_at"),
             "body": self._body(c.get("body_text"), c.get("body")),
         }
+        text = c.get("body_text") or html_to_text(c.get("body"))
         if c.get("incoming"):          # only customer-authored text is untrusted
-            self._flag_untrusted(out, c.get("body_text") or html_to_text(c.get("body")))
+            self._flag_untrusted(out, text)
+        from .insights import extract_payment_refs
+        refs = extract_payment_refs(text)
+        if refs:
+            out["payment_refs"] = refs
         if c.get("attachments"):
             out["attachments"] = [
                 {"name": a.get("name"), "content_type": a.get("content_type"), "size": a.get("size")}

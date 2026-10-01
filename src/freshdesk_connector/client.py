@@ -45,7 +45,7 @@ __all__ = ["DEFAULT_LIMIT_PER_MIN", "FreshdeskClient", "RateLimiter", "RedisRate
 
 log = logging.getLogger("freshdesk_connector")
 
-USER_AGENT = "agent-studio-freshdesk-connector/0.2"
+USER_AGENT = "agent-studio-freshdesk-connector/0.3"
 
 # Credits spent by the current tool call (read by the observability layer).
 credits_spent: contextvars.ContextVar[int] = contextvars.ContextVar("credits_spent", default=0)
