@@ -1,268 +1,261 @@
-"""A small Freshdesk API v2 look-alike for offline demos and tests.
+"""A WooCommerce REST API test double.
 
-Faithful on the parts the connector depends on:
-  * Basic auth with API key as username (401 otherwise)
-  * page/per_page pagination with `Link: <...>; rel="next"`
-  * tickets list default window = created in last 30 days unless updated_since
-  * /search/tickets query language subset, 30 per page, max 10 pages, `total`
-  * per-minute account rate limit with X-RateLimit-* headers and 429 + Retry-After
-  * an optional "flaky" mode returning 503s to exercise retries
+Faithful where it matters for a connector:
 
-Run:  uvicorn mock_server.app:app --port 8765
+* the `/wp-json/wc/v3` namespace,
+* HTTP Basic auth *and* `consumer_key`/`consumer_secret` query parameters,
+* `X-WP-Total`, `X-WP-TotalPages` and `Link: rel="next"` pagination headers,
+* the real error envelope `{"code", "message", "data": {"status"}}`,
+* `per_page` capped at 100, with WooCommerce's own 400 when it is exceeded,
+* optional throttling so rate-limit handling can be tested end to end.
+
+Run it with `uvicorn mock_server.app:app --port 8787`.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import os
-import re
 import time
-from collections import deque
-from datetime import datetime, timedelta, timezone
+from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import data as D
+from . import data
 
-MOCK_API_KEY = "mock-api-key-123"
+app = FastAPI(title="Mock WooCommerce")
+
+MAX_PER_PAGE = 100
+RATE_LIMIT = int(os.environ.get("MOCK_RATE_LIMIT", "0"))   # 0 = unlimited
+_hits: list[float] = []
 
 
-def _parse_dt(s: str) -> datetime:
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+def err(code: str, message: str, status: int) -> JSONResponse:
+    return JSONResponse({"code": code, "message": message, "data": {"status": status}},
+                        status_code=status)
 
 
-def create_app(*, rate_limit_per_min: int | None = None, api_key: str = MOCK_API_KEY,
-               fail_first_n: int = 0, external_usage: int = 0, clock=time.monotonic) -> FastAPI:
-    """external_usage: requests already spent this minute by the merchant's *other*
-    integrations (Freshdesk quotas are per account, shared by every app)."""
-    limit = rate_limit_per_min or int(os.environ.get("MOCK_RATE_LIMIT", "100"))
-    state = {"hits": deque([clock()] * external_usage), "fails_left": fail_first_n, "requests": 0,
-             "deny_ticket_fields": False, "throttled": 0, "paths": {}}
-    app = FastAPI(title="Mock Freshdesk")
-    app.state.mock = state
+def _rfc3986(value: Any) -> str:
+    return quote(str(value), safe="")
 
-    @app.middleware("http")
-    async def gate(request: Request, call_next):
-        if request.url.path == "/__mock/stats":          # test-only introspection, no auth
-            return JSONResponse({"requests": state["requests"], "throttled_429": state["throttled"],
-                                 "credits_in_window": len(state["hits"]), "limit": limit})
-        state["requests"] += 1
-        state["paths"][request.url.path] = state["paths"].get(request.url.path, 0) + 1
-        auth = request.headers.get("authorization", "")
-        ok = False
-        if auth.startswith("Basic "):
-            try:
-                user = base64.b64decode(auth[6:]).decode().split(":", 1)[0]
-                ok = user == api_key
-            except Exception:
-                ok = False
-        if not ok:
-            return JSONResponse({"code": "invalid_credentials", "message": "You have to be logged in to perform this action."}, status_code=401)
 
-        now = clock()
-        hits = state["hits"]
-        while hits and now - hits[0] >= 60:
-            hits.popleft()
-        cost = request_cost(request)
-        if len(hits) + cost > limit:
-            state["throttled"] += 1
-            retry = max(1, int(60 - (now - hits[0])) + 1) if hits else 60
-            return JSONResponse({"message": "Rate limit exceeded"}, status_code=429,
-                                headers={"Retry-After": str(retry), "X-RateLimit-Total": f"{limit}.0",
-                                         "X-RateLimit-Remaining": "0.0"})
-        hits.extend([now] * cost)
+def _oauth_authorized(request: Request) -> bool:
+    """Verify an OAuth 1.0a one-legged signature the way WooCommerce does.
 
-        if state["fails_left"] > 0:
-            state["fails_left"] -= 1
-            return JSONResponse({"message": "Service Unavailable"}, status_code=503)
+    Mirrors WC_REST_Authentication::check_oauth_signature(), including the two
+    quirks: each `key=value` pair is RFC 3986 encoded whole and the pairs are
+    joined with %26, and the signing key is `consumer_secret + "&"`.
+    """
+    params = dict(request.query_params)
+    provided = params.pop("oauth_signature", None)
+    if not provided or params.get("oauth_consumer_key") != data.CONSUMER_KEY:
+        return False
+    method = params.get("oauth_signature_method", "")
+    algo = {"HMAC-SHA256": hashlib.sha256, "HMAC-SHA1": hashlib.sha1}.get(method)
+    if algo is None:
+        return False
 
-        resp = await call_next(request)
-        # Real Freshdesk sends these as decimals, e.g. "700.0" (see API docs, Rate Limit section)
-        resp.headers["X-RateLimit-Total"] = f"{limit}.0"
-        resp.headers["X-RateLimit-Remaining"] = f"{max(0, limit - len(hits))}.0"
-        resp.headers["X-RateLimit-Used-CurrentRequest"] = str(cost)
-        return resp
+    url = str(request.url).split("?", 1)[0]
+    ordered = sorted(params.items())
+    pairs = [_rfc3986(f"{_rfc3986(k)}={_rfc3986(v)}") for k, v in ordered]
+    base = f"{request.method.upper()}&{_rfc3986(url)}&{'%26'.join(pairs)}"
+    expected = base64.b64encode(
+        hmac.new((data.CONSUMER_SECRET + "&").encode(), base.encode(), algo).digest()
+    ).decode()
+    return hmac.compare_digest(expected, provided)
 
-    def paginate(request: Request, items: list):
+
+def _authorized(request: Request) -> bool:
+    # Real WooCommerce only accepts Basic auth over TLS and otherwise falls
+    # through to OAuth. The mock accepts both so either path can be tested.
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("basic "):
         try:
-            page = int(request.query_params.get("page", 1))
-            per_page = int(request.query_params.get("per_page", 30))
-        except ValueError:
-            return JSONResponse({"description": "Validation failed", "errors": [
-                {"field": "page", "message": "It should be a Positive Integer", "code": "invalid_value"}]},
-                status_code=400)
-        if per_page > 100 or per_page < 1 or page < 1:
-            return JSONResponse({"description": "Validation failed", "errors": [
-                {"field": "per_page", "message": "Must be between 1 and 100", "code": "invalid_value"}]},
-                status_code=400)
-        start = (page - 1) * per_page
-        chunk = items[start:start + per_page]
-        headers = {}
-        if start + per_page < len(items):
-            qp = dict(request.query_params)
-            qp["page"] = str(page + 1)
-            q = "&".join(f"{k}={v}" for k, v in qp.items())
-            headers["Link"] = f'<{request.url.path}?{q}>; rel="next"'
-        return JSONResponse(chunk, headers=headers)
+            decoded = base64.b64decode(header[6:]).decode()
+        except Exception:
+            return False
+        user, _, pwd = decoded.partition(":")
+        if user == data.CONSUMER_KEY and pwd == data.CONSUMER_SECRET:
+            return True
+    if "oauth_signature" in request.query_params:
+        return _oauth_authorized(request)
+    key = request.query_params.get("consumer_key")
+    secret = request.query_params.get("consumer_secret")
+    if key and secret:
+        return key == data.CONSUMER_KEY and secret == data.CONSUMER_SECRET
+    return False
 
-    @app.get("/api/v2/ticket_fields")
-    async def ticket_fields():
-        if state.get("deny_ticket_fields"):
-            return JSONResponse({"code": "access_denied", "message": "You are not authorized"}, status_code=403)
-        return [
-            {"id": 4, "name": "source", "type": "default_source",
-             "choices": {"Email": 1, "Portal": 2, "Phone": 3, "Chat": 7, "Feedback Widget": 9}},
-            {"id": 5, "name": "status", "type": "default_status", "label": "Status",
-             "choices": {k: [v, v] for k, v in D.STATUS_CHOICES.items()}},
-        ]
 
-    @app.get("/api/v2/agents/me")
-    async def me():
-        return D.AGENT_ME
+@app.middleware("http")
+async def gate(request: Request, call_next):
+    if not request.url.path.startswith("/wp-json/wc/v3"):
+        return await call_next(request)
 
-    @app.get("/api/v2/tickets")
-    async def list_tickets(request: Request):
-        qp = request.query_params
-        items = list(D.TICKETS)
-        if "updated_since" in qp:
-            since = _parse_dt(qp["updated_since"])
-            items = [t for t in items if _parse_dt(t["updated_at"]) >= since]
-        else:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=30)
-            items = [t for t in items if _parse_dt(t["created_at"]) >= cutoff]
-        if "email" in qp:
-            ids = {c["id"] for c in D.CONTACTS if c["email"] == qp["email"].lower()}
-            items = [t for t in items if t["requester_id"] in ids]
-        if "requester_id" in qp:
-            items = [t for t in items if t["requester_id"] == int(qp["requester_id"])]
-        if "company_id" in qp:
-            items = [t for t in items if t["company_id"] == int(qp["company_id"])]
-        key = qp.get("order_by", "created_at")
-        items.sort(key=lambda t: t[key], reverse=qp.get("order_type", "desc") == "desc")
-        # Freshdesk list omits description unless include=description
-        items = [{k: v for k, v in t.items() if k not in ("description", "description_text")} for t in items]
-        return paginate(request, items)
+    if RATE_LIMIT:
+        now = time.monotonic()
+        _hits[:] = [t for t in _hits if now - t < 60]
+        if len(_hits) >= RATE_LIMIT:
+            retry = max(1, int(60 - (now - _hits[0])))
+            return JSONResponse(
+                {"code": "too_many_requests", "message": "Too many requests.",
+                 "data": {"status": 429}},
+                status_code=429,
+                headers={"Retry-After": str(retry), "RateLimit-Limit": str(RATE_LIMIT),
+                         "RateLimit-Remaining": "0"},
+            )
+        _hits.append(now)
 
-    @app.get("/api/v2/tickets/{tid}")
-    async def get_ticket(tid: int, request: Request):
-        t = next((t for t in D.TICKETS if t["id"] == tid), None)
-        if not t:
-            return JSONResponse({"code": "access_denied"} if tid == 403 else {}, status_code=404)
-        out = dict(t)
-        include = request.query_params.get("include", "")
-        if "requester" in include:
-            out["requester"] = next(c for c in D.CONTACTS if c["id"] == t["requester_id"])
-        if "stats" in include:
-            out["stats"] = {"first_responded_at": D.CONVERSATIONS[tid][0]["created_at"],
-                            "resolved_at": t["updated_at"] if t["status"] in (4, 5) else None}
+    if not _authorized(request):
+        return err("woocommerce_rest_authentication_error",
+                   "Consumer key or secret is invalid.", 401)
+    return await call_next(request)
+
+
+def paginate(rows: list[dict], request: Request) -> tuple[list[dict], dict] | JSONResponse:
+    try:
+        page = int(request.query_params.get("page", 1))
+        per_page = int(request.query_params.get("per_page", 10))
+    except ValueError:
+        return err("rest_invalid_param", "Invalid parameter(s): per_page", 400)
+    if per_page > MAX_PER_PAGE or per_page < 1:
+        return err("rest_invalid_param",
+                   f"Invalid parameter(s): per_page. per_page must be between 1 and {MAX_PER_PAGE}.", 400)
+    if page < 1:
+        return err("rest_invalid_param", "Invalid parameter(s): page", 400)
+
+    total = len(rows)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    start = (page - 1) * per_page
+    window = rows[start:start + per_page]
+    headers = {"X-WP-Total": str(total), "X-WP-TotalPages": str(total_pages)}
+    if page < total_pages:
+        url = str(request.url.include_query_params(page=page + 1))
+        headers["Link"] = f'<{url}>; rel="next"'
+    return window, headers
+
+
+def _matches_order(o: dict, p: Any) -> bool:
+    status = p.get("status")
+    if status and status != "any":
+        if o.get("status") not in status.split(","):
+            return False
+    after, before = p.get("after"), p.get("before")
+    created = o.get("date_created_gmt") or ""
+    if after and created < after:
+        return False
+    if before and created > before:
+        return False
+    modified_after = p.get("modified_after")
+    if modified_after and (o.get("date_modified_gmt") or "") < modified_after:
+        return False
+    customer = p.get("customer")
+    if customer not in (None, "") and str(o.get("customer_id")) != str(customer):
+        return False
+    product = p.get("product")
+    if product not in (None, ""):
+        if not any(str(i.get("product_id")) == str(product) for i in o.get("line_items", [])):
+            return False
+    search = (p.get("search") or "").lower()
+    if search:
+        b = o.get("billing") or {}
+        hay = " ".join(str(x) for x in (
+            o.get("number"), b.get("email"), b.get("first_name"), b.get("last_name"))).lower()
+        if search not in hay:
+            return False
+    return True
+
+
+@app.get("/wp-json/wc/v3/orders")
+async def list_orders(request: Request):
+    p = dict(request.query_params)
+    rows = [o for o in data.ORDERS if _matches_order(o, p)]
+    rows.sort(key=lambda o: o.get("date_created_gmt") or "",
+              reverse=p.get("order", "desc") != "asc")
+    out = paginate(rows, request)
+    if isinstance(out, JSONResponse):
         return out
-
-    @app.get("/api/v2/tickets/{tid}/conversations")
-    async def convs(tid: int, request: Request):
-        if tid not in D.CONVERSATIONS:
-            return JSONResponse({}, status_code=404)
-        return paginate(request, D.CONVERSATIONS[tid])
-
-    @app.get("/api/v2/search/tickets")
-    async def search(request: Request):
-        raw = request.query_params.get("query", "")
-        try:
-            pred = _compile_query(raw)
-            page = int(request.query_params.get("page", 1))
-            if not 1 <= page <= 10:
-                raise ValueError("page must be 1..10")
-        except ValueError as e:
-            return JSONResponse({"description": "Validation failed",
-                                 "errors": [{"field": "query", "message": str(e), "code": "invalid_value"}]},
-                                status_code=400)
-        hits = [t for t in D.TICKETS if pred(t)]
-        hits.sort(key=lambda t: t["updated_at"], reverse=True)
-        chunk = hits[(page - 1) * 30: page * 30]
-        return {"results": chunk, "total": len(hits)}
-
-    @app.get("/api/v2/contacts")
-    async def contacts(request: Request):
-        qp = request.query_params
-        items = list(D.CONTACTS)
-        if "email" in qp:
-            items = [c for c in items if c["email"] == qp["email"].lower()]
-        for f in ("phone", "mobile"):
-            if f in qp:
-                # Freshdesk matches the number exactly as it was stored
-                items = [c for c in items if c.get(f) == qp[f]]
-        return paginate(request, items)
-
-    @app.get("/api/v2/contacts/autocomplete")
-    async def contacts_ac(term: str):
-        return [{"id": c["id"], "name": c["name"]} for c in D.CONTACTS
-                if any(p.lower().startswith(term.lower()) for p in [c["name"], *c["name"].split()])]
-
-    @app.get("/api/v2/contacts/{cid}")
-    async def contact(cid: int):
-        c = next((c for c in D.CONTACTS if c["id"] == cid), None)
-        return c if c else JSONResponse({}, status_code=404)
-
-    @app.get("/api/v2/companies/autocomplete")
-    async def companies_ac(name: str):
-        return {"companies": [{"id": c["id"], "name": c["name"]} for c in D.COMPANIES
-                              if c["name"].lower().startswith(name.lower())]}
-
-    @app.get("/api/v2/companies/{cid}")
-    async def company(cid: int):
-        c = next((c for c in D.COMPANIES if c["id"] == cid), None)
-        return c if c else JSONResponse({}, status_code=404)
-
-    return app
+    window, headers = out
+    return JSONResponse(window, headers=headers)
 
 
-def request_cost(request: Request) -> int:
-    """API credits a call consumes. Docs: each `include` costs 2 extra credits
-    (include=stats -> 3 total); include=conversations on a ticket costs 2 total."""
-    inc = [x for x in request.query_params.get("include", "").split(",") if x]
-    return 1 + sum(1 if x == "conversations" else 2 for x in inc)
+@app.get("/wp-json/wc/v3/orders/{order_id}")
+async def get_order(order_id: int):
+    for o in data.ORDERS:
+        if o["id"] == order_id:
+            return JSONResponse(o)
+    return err("woocommerce_rest_invalid_id", "Invalid ID.", 404)
 
 
-# ---------------------------------------------------------- query language
-_TERM_RE = re.compile(r"^(\w+):(>|<)?(?:'([^']*)'|(\d+)|(null))$")
-_FIELD_MAP = {"agent_id": "responder_id", "tag": "tags"}
-_DATE_FIELDS = {"created_at", "updated_at", "due_by", "fr_due_by"}
+@app.get("/wp-json/wc/v3/orders/{order_id}/refunds")
+async def order_refunds(order_id: int, request: Request):
+    if not any(o["id"] == order_id for o in data.ORDERS):
+        return err("woocommerce_rest_invalid_id", "Invalid ID.", 404)
+    out = paginate(data.REFUNDS.get(order_id, []), request)
+    if isinstance(out, JSONResponse):
+        return out
+    window, headers = out
+    return JSONResponse(window, headers=headers)
 
 
-def _term(expr: str):
-    m = _TERM_RE.match(expr.strip())
-    if not m:
-        raise ValueError(f"Invalid term: {expr!r}")
-    field, op, sval, nval, null = m.groups()
-    key = _FIELD_MAP.get(field, field)
-    if null:
-        return (lambda t: not t["tags"]) if key == "tags" else (lambda t: t.get(key) is None)
-    if field in _DATE_FIELDS:
-        if not op or sval is None:
-            raise ValueError(f"{field} needs :> or :< with a quoted date")
-        bound = sval[:10]
-        # Freshdesk: ":>" is greater-than-OR-EQUAL, ":<" is less-than-OR-EQUAL
-        return (lambda t: t[key][:10] >= bound) if op == ">" else (lambda t: t[key][:10] <= bound)
-    val = int(nval) if nval is not None else sval
-    if key == "tags":
-        return lambda t: val in t["tags"]
-    return lambda t: t.get(key) == val
+@app.get("/wp-json/wc/v3/products")
+async def list_products(request: Request):
+    p = dict(request.query_params)
+    rows = list(data.PRODUCTS)
+    status = p.get("status")
+    if status and status != "any":
+        rows = [r for r in rows if r.get("status") in status.split(",")]
+    if p.get("stock_status"):
+        rows = [r for r in rows if r.get("stock_status") == p["stock_status"]]
+    if p.get("sku"):
+        rows = [r for r in rows if p["sku"].lower() in (r.get("sku") or "").lower()]
+    if p.get("search"):
+        s = p["search"].lower()
+        rows = [r for r in rows if s in (r.get("name") or "").lower()
+                or s in (r.get("sku") or "").lower()]
+    out = paginate(rows, request)
+    if isinstance(out, JSONResponse):
+        return out
+    window, headers = out
+    return JSONResponse(window, headers=headers)
 
 
-def _compile_query(raw: str):
-    q = raw.strip()
-    if not (q.startswith('"') and q.endswith('"')) or len(q) > 512:
-        raise ValueError("query must be wrapped in double quotes and <= 512 chars")
-    q = q[1:-1]
-    preds = []
-    for clause in re.split(r"\s+AND\s+", q):
-        clause = clause.strip()
-        if clause.startswith("(") and clause.endswith(")"):
-            ors = [_term(x) for x in re.split(r"\s+OR\s+", clause[1:-1])]
-            preds.append(lambda t, ors=ors: any(p(t) for p in ors))
-        else:
-            preds.append(_term(clause))
-    return lambda t: all(p(t) for p in preds)
+@app.get("/wp-json/wc/v3/products/{product_id}")
+async def get_product(product_id: int):
+    for p in data.PRODUCTS:
+        if p["id"] == product_id:
+            return JSONResponse(p)
+    return err("woocommerce_rest_invalid_id", "Invalid ID.", 404)
 
 
-app = create_app(api_key=os.environ.get("MOCK_API_KEY", MOCK_API_KEY))
+@app.get("/wp-json/wc/v3/customers")
+async def list_customers(request: Request):
+    p = dict(request.query_params)
+    rows = list(data.CUSTOMERS)
+    if p.get("email"):
+        rows = [c for c in rows if (c.get("email") or "").lower() == p["email"].lower()]
+    if p.get("search"):
+        s = p["search"].lower()
+        rows = [c for c in rows if s in " ".join(
+            str(x) for x in (c.get("first_name"), c.get("last_name"), c.get("email"))).lower()]
+    out = paginate(rows, request)
+    if isinstance(out, JSONResponse):
+        return out
+    window, headers = out
+    return JSONResponse(window, headers=headers)
+
+
+@app.get("/wp-json/wc/v3/customers/{customer_id}")
+async def get_customer(customer_id: int):
+    for c in data.CUSTOMERS:
+        if c["id"] == customer_id:
+            return JSONResponse(c)
+    return err("woocommerce_rest_invalid_id", "Invalid ID.", 404)
+
+
+@app.get("/wp-json/wc/v3/{rest:path}")
+async def unknown(rest: str):
+    return err("rest_no_route", f"No route was found matching the URL: /wc/v3/{rest}", 404)

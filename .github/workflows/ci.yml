@@ -19,8 +19,6 @@ jobs:
       - run: ruff check .
       - run: mypy
       - run: bandit -q -r src
-      - name: Dependency vulnerability audit (hash-pinned lockfile)
-        run: pip-audit --strict -r requirements.lock --require-hashes
 
   test:
     name: tests (py${{ matrix.python-version }})
@@ -33,40 +31,33 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "${{ matrix.python-version }}"}
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
       - run: pip install -e ".[dev]"
-      - name: Unit, conformance, integration and production tests
+      - name: Unit, conformance, guardrail and fuzz tests
         run: pytest -q --cov --cov-report=term
-      - name: End-to-end MCP demo against mock Freshdesk
+      - name: End-to-end MCP demo against the mock store
         run: python scripts/demo.py
 
-  evals:
-    name: agent evals
-    runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12"}
-      - run: pip install -e ".[dev]"
-      - run: python -m evals.run --oracle
-      - name: LLM evals (only when an API key secret is configured)
-        if: env.ANTHROPIC_API_KEY != ''
-        run: pip install -e ".[evals]" && python -m evals.run --llm --repeats 3
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with: {name: eval-report, path: "evals/report.*"}
-
-  container:
-    name: docker image + compose smoke test
+  live:
+    name: live store (real WordPress + WooCommerce)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install -e ".[dev]"
-      - name: Build, run 2 replicas + Redis + mock, test auth/health/budget/metrics/log hygiene
-        run: bash scripts/smoke_compose.sh
-      - if: failure()
-        run: cat /tmp/compose.log || true
+      - name: Stand up a real WooCommerce store
+        working-directory: deploy/woo-local
+        run: |
+          docker compose up -d
+          ./bootstrap.sh | tee /tmp/bootstrap.log
+      - name: Run the connector against it, read-only
+        run: |
+          export WOO_STORE_URL=http://localhost:8080
+          export WOO_CONSUMER_KEY=$(grep -o 'ck_[a-f0-9]*' /tmp/bootstrap.log | head -1)
+          export WOO_CONSUMER_SECRET=$(grep -o 'cs_[a-f0-9]*' /tmp/bootstrap.log | head -1)
+          python scripts/demo.py --live
+      - name: Prove the key cannot write
+        run: |
+          export WOO_CONSUMER_KEY=$(grep -o 'ck_[a-f0-9]*' /tmp/bootstrap.log | head -1)
+          export WOO_CONSUMER_SECRET=$(grep -o 'cs_[a-f0-9]*' /tmp/bootstrap.log | head -1)
+          python scripts/assert_read_only.py

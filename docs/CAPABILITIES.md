@@ -1,77 +1,97 @@
-# What the agent can and cannot do
+# What the agent can and can't do
 
-This is the one-page brief for the merchant and for whoever writes the Agent Studio agent's prompt.
+The deliverable the assignment asks for: an honest account of the connector's
+reach, written for whoever has to decide whether to trust it with a merchant.
 
-## The short version
+## Can
 
-The agent can **read** the merchant's Freshdesk helpdesk: tickets, ticket threads, customers (contacts) and companies. It can find a customer by email, phone or name, see their ticket history, filter tickets by status, priority, tag and date, and read a full conversation thread.
+### Orders
+- List recent orders, newest first, with WooCommerce's own total count.
+- Search orders by status, free text (order number, billing name, billing
+  email), created/modified date range, customer id or product id.
+- Fetch one order in full: line items, totals, billing and shipping, the
+  customer note, and the refund rows recorded against it.
+- List the refund rows for an order on their own.
 
-It **cannot change anything**. It can't reply to customers, update tickets, add notes, assign tickets, or create or delete records. The connector only issues `GET` requests, and every MCP tool is marked `readOnlyHint: true`.
+### Products and customers
+- Find products by name, SKU, stock status or publication status; read price,
+  sale price, stock level and lifetime sales.
+- Find registered customers by name or email; read order count and spend.
+- Pull a customer's order history by id **or** by email, including guest
+  checkouts, which have no customer account at all.
 
-## Can do
+### Payment intelligence (the part a generic reader does not have)
+- Extract Razorpay references from every order: payment, gateway order,
+  refund, subscription, plan, invoice, payment-link and settlement ids, plus
+  labelled UPI UTR/RRN and card ARN values.
+- Classify payment state: paid, awaiting_payment, failed, cancelled,
+  partially_refunded, fully_refunded.
+- Flag reconciliation gaps, which is the point of the connector:
+  - `refund_not_confirmed_at_gateway` — WooCommerce says refunded, no `rfnd_`
+    id exists, so the money may not have moved;
+  - `multiple_payments` — more than one `pay_` id on one order;
+  - `paid_without_gateway_reference` — paid via Razorpay with nothing to
+    reconcile against a settlement.
+- Rank the backlog with `store_pulse`, every entry carrying the plain-language
+  reasons behind its score.
 
-| Agent question | Tool(s) |
+### Operationally
+- Report its own health, the key's visibility and the remaining rate budget.
+- Degrade predictably: structured JSON errors with an actionable `hint`,
+  never a stack trace, never an unbounded wait.
+
+## Can't
+
+### By design
+- **Write anything.** No refunds, no status changes, no cancellations, no
+  notes, no customer edits. The connector issues only `GET`, and the
+  WooCommerce key it uses is Read-scoped, so the store refuses writes
+  independently of this code.
+- **Call Razorpay.** It finds the references; it does not look them up. Until
+  a Razorpay tool is paired with it, `reconciliation` tells you where to look,
+  not what the gateway says.
+- **Decide anything financial.** It will not tell a customer a refund has
+  arrived. The prompts are written to stop exactly that.
+
+### Limits of the data
+- **Guest checkouts have no customer record.** `customer_order_history` falls
+  back to matching on billing details and reports `matched_by: guest_email`.
+  Two different people sharing an email address would collapse into one view.
+- **`total_spent` and `orders_count` come from WooCommerce's own aggregates**
+  and exclude guest orders placed before an account existed.
+- **Stock figures are a snapshot.** They can change between the call and the
+  customer reading the reply.
+- **Refund reasons are free text** written by shop staff. A Razorpay refund id
+  is only found there if someone pasted it.
+- **Deleted and draft orders are invisible.** `trash` and `checkout-draft` are
+  deliberately excluded from the allowed statuses.
+
+### Limits of the deployment
+- **One replica.** The rate budget is in-process. Several replicas sharing one
+  store would each think they had the full budget; that needs a shared
+  backend, which is sketched in ARCHITECTURE.md but not built.
+- **One store per process.** There is no tenant registry. Multi-merchant
+  hosting would need the token-to-tenant binding this connector does not yet
+  have.
+- **WooCommerce core only.** Subscriptions, Bookings, Memberships and most
+  payment plugins expose their own REST namespaces that are not wired up. A
+  Razorpay subscription is visible only through whatever it writes onto the
+  order.
+- **No webhooks.** The agent pulls; the store cannot push. Anything
+  event-driven needs the webhook work described in ARCHITECTURE.md.
+
+## Things that will surprise you about WooCommerce
+
+Pinned as tests in `tests/test_api_conformance.py`, because each one is a
+plausible implementation that is wrong against a real store.
+
+| Behaviour | Consequence if you get it wrong |
 |---|---|
-| "What's the status of my complaint?" (customer gives email) | `customer_ticket_history` → `get_ticket` |
-| "Show urgent open tickets about refunds this week" | `search_tickets(status=[open], priority=[urgent], tags=[refund], created_after=…)` |
-| "Which tickets nobody has picked up?" | `search_tickets(status=[open], unassigned=true)` |
-| "What has changed since this morning?" | `list_tickets(updated_since=…)` |
-| "Summarise the conversation on ticket 4512" | `get_ticket(4512)`, then `list_ticket_conversations` if `conversations_truncated` |
-| "Who is +91 98xxxxxx21?" | `find_contacts(phone=…)` |
-| "How many open tickets does Brewhouse Cafes have, and are they at risk?" | `find_companies` → `get_company` → `list_tickets(company_id=…)` |
-| "Where's my refund?" (customer on a ticket) | `get_ticket` → `signals.payment_refs` (`pay_…`, `rfnd_…`, UTR) → Razorpay Refunds API (if the agent has it) |
-| "What should the team work on first?" | `support_pulse` → ranked `needs_attention` with reasons |
-| "How much of our backlog is payment-related?" | `support_pulse` → `payment_related`, `by_intent` |
-| "Is the connector working / whose access is it using?" | `connector_status` |
-
-The data comes back shaped for an LLM:
-- **Every ticket has `signals`:** `intent` + `intent_evidence` + `payment_related`, `payment_refs` (Razorpay entity ids, UTR/RRN, card ARN, ₹ amounts, merchant order id, collected across the ticket and its thread) and `sla` (overdue / due soon / first response missed). Plus `source_url` for citations.
-- Status, priority and source are words (`"pending"`), not Freshdesk's numeric codes. Custom statuses (e.g. `waiting_on_customer`) are read from the merchant's own account.
-- HTML bodies are converted to text and capped (2,000 chars by default).
-- Every list result says `has_more` / `next_page`, so the agent knows when it has only part of the data.
-- **Private notes are withheld by default.** Most Agent Studio agents talk to end customers, and internal notes hold escalation details, phone numbers and "don't refund this one" remarks. The response says how many were withheld (`private_notes_withheld`). An internal support copilot can opt in per merchant (`"private_notes": "include"`); they then come back labelled `private_note: true`, and the server instructions tell the model never to quote them to a customer.
-- **Customer-written text is treated as untrusted.** Ticket subjects, descriptions and customer messages that look like prompt injection ("ignore previous instructions…", fake `<system>` tags, "call the update_ticket tool") come back with `content_flags: ["possible_prompt_injection"]`, and the server instructions tell the model to treat that text as data. The detector is tuned to stay silent on ordinary support language; the tests check both sides.
-- **Responses have a size budget** (60,000 characters by default). Oversized results drop list items from the end and say so (`truncated_for_size`, `conversations_omitted_for_size`), so one giant thread can't flood the agent's context window.
-- Long threads report `conversations_returned`, so the model doesn't have to count messages itself.
-- PII masking (emails and phone numbers) can be switched on per merchant (`"redact_pii": true`) or globally (`FRESHDESK_REDACT_PII=true`).
-
-## Cannot do (and why)
-
-| Limitation | Reason | Workaround |
-|---|---|---|
-| Write anything: reply, update status, add a note, assign | Out of scope by design. Read-only is the safe default for a first deployment. | Add write tools later behind human approval (see README, "Long-term"). |
-| Full-text search of ticket subjects or bodies ("tickets mentioning 'courier'") | Freshdesk's search API filters on fields only; it has no keyword search. | Filter by tag, type or date, then let the model scan the results. |
-| See archived tickets, or changes made in the last few minutes, via search | Freshdesk search excludes archived tickets and indexes with a short delay. | Use `get_ticket` by id, or `list_tickets(updated_since=…)`. |
-| See more than 300 search results for one query | Freshdesk caps search at 10 pages × 30. | The tool returns `total_matches` and a warning; narrow the query with date ranges. |
-| See tickets older than 30 days with a plain `list_tickets` | That's Freshdesk's default list window. | Pass `updated_since`. The tool response includes a reminder note. |
-| See tickets the API key's agent can't see | Freshdesk applies the agent's role and group scopes to the key. | Use a key belonging to an agent with "all tickets" scope, ideally a dedicated integration agent. |
-| Download attachments | Only file name, type and size are returned, to keep payloads small and PII exposure low. | Possible future `get_attachment` tool. |
-| Read Solutions (KB articles), canned responses, time entries, satisfaction ratings | Not needed for v1 support use cases. | Same pattern; each is roughly 20 lines in `service.py` plus a tool. |
-| Real-time updates | Pull only. | Freshdesk webhooks or automations → Agent Studio trigger (long-term). |
-
-## Behaviour under rate limits
-
-Freshdesk limits are **per account per minute**: 50 calls/min on trial plans and up to about 700 on Enterprise. The limit is shared with every other app the merchant has installed. The connector:
-
-1. learns the real limit from the `X-RateLimit-Total` header, and counts *credits* rather than requests (each `include` costs Freshdesk 2 extra credits);
-2. allows itself only 80% of it (`FRESHDESK_RATE_RESERVE=0.2`), so the merchant's other integrations keep working. With `REDIS_URL` set, every replica draws from **one** budget per Freshdesk domain (an atomic Redis script), so scaling out never multiplies the load on the merchant's account;
-3. waits client-side when that budget is used up, and honours `Retry-After` on a 429;
-4. never blocks a tool call for more than `FRESHDESK_MAX_WAIT_S` (20s by default). Past that limit it returns
-   `{"error": "rate_limited", "retry_after_seconds": 42, "hint": "Wait about 42s …"}`, so the agent can tell the user instead of hanging.
-
-Transient 5xx and network errors are retried with exponential backoff. Retrying is safe because every call is a GET.
-
-## Error contract
-
-Every failure is an MCP tool error whose text is JSON:
-
-| `error` | Meaning | What the agent should do |
-|---|---|---|
-| `auth_failed` | Key invalid or revoked | Stop; ask the merchant to re-authenticate |
-| `permission_denied` | Key's agent can't see that record | Tell the user; don't retry |
-| `not_found` | Bad id | Use a search or find tool |
-| `invalid_request` | Bad arguments | Fix them per `message` and retry |
-| `rate_limited` | Quota exhausted | Wait `retry_after_seconds` |
-| `upstream_unavailable` | Freshdesk down | Retry once later, then tell the user |
-| `not_configured` | No credentials | Run `freshdesk-connector auth login` |
-| `internal_error` | Unexpected connector bug (details only in server logs) | Don't retry; tell the user the lookup failed |
+| Basic auth works **only over HTTPS**; plain HTTP needs OAuth 1.0a | Every call returns `cannot_view`, which reads like a permissions bug, not an auth bug |
+| Paging metadata is in `X-WP-Total` / `X-WP-TotalPages` / `Link`, not the body | You cannot tell the agent how many orders matched |
+| `per_page` is capped at 100 | A 400 from the store instead of a clear client-side message |
+| Guest orders have `customer_id = 0`, not `null` | A truthiness check assigns every guest order to customer 0 |
+| Customers created at checkout have no WP role | The default role filter hides them and the agent reports "no account" |
+| `woocommerce_rest_cannot_view` arrives as 401 on some hosts, 403 on others | A scoped-out key is misreported as a revoked one |
+| WooCommerce 8.2+ moved orders out of `wp_posts` (HPOS) | The legacy `post.php` admin link 404s, so every citation is broken |
+| A bare date in `after` is treated as midnight | Same-day orders silently disappear from the results |

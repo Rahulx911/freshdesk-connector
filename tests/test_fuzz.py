@@ -1,72 +1,89 @@
-"""Property-based fuzzing of the inputs most exposed to an LLM or to customer
-text: the search-query builder, HTML conversion, PII masking and the
-injection detector. Hypothesis generates thousands of adversarial cases."""
+"""Property-based tests. The invariants that must hold for any input."""
 
-import re
+from __future__ import annotations
+
+import json
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from freshdesk_connector import guardrails
-from freshdesk_connector.errors import InvalidRequest
-from freshdesk_connector.insights import classify_intent, extract_payment_refs
-from freshdesk_connector.normalize import html_to_text, mask_pii
-from freshdesk_connector.query import build_ticket_query
-from mock_server.app import _compile_query
+from woocommerce_connector import query as q
+from woocommerce_connector.errors import InvalidRequest
+from woocommerce_connector.guardrails import fit_response, scan_injection
+from woocommerce_connector.insights import derive, scan_text
+from woocommerce_connector.normalize import mask_email, mask_phone
 
-FAST = settings(max_examples=400, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+SETTINGS = settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow], deadline=None)
 
 
-@FAST
-@given(st.lists(st.text(min_size=0, max_size=40), min_size=1, max_size=5))
-def test_tag_filter_either_rejects_or_builds_a_query_that_means_only_tags(tags):
+@given(st.text())
+@SETTINGS
+def test_scan_text_never_raises(text):
+    out = scan_text(text)
+    assert isinstance(out, dict)
+    for key, value in out.items():
+        if key == "signature_verified":
+            continue
+        assert isinstance(value, list)
+
+
+@given(st.text())
+@SETTINGS
+def test_injection_scan_never_raises(text):
+    assert isinstance(scan_injection(text), list)
+
+
+@given(st.text(min_size=1))
+@SETTINGS
+def test_masked_email_never_contains_a_long_local_part(raw):
+    masked = mask_email(raw) or ""
+    local = raw.split("@")[0]
+    if "@" in raw and len(local) > 2:
+        assert local not in masked
+
+
+@given(st.text())
+@SETTINGS
+def test_masked_phone_keeps_at_most_four_digits(raw):
+    masked = mask_phone(raw) or ""
+    digits = [c for c in masked if c.isdigit()]
+    assert len(digits) <= 4
+
+
+@given(st.integers())
+@SETTINGS
+def test_per_page_either_validates_or_raises(n):
     try:
-        q = build_ticket_query(tags=tags)
+        out = q.clean_per_page(n)
+        assert 1 <= out <= q.MAX_PER_PAGE
     except InvalidRequest:
-        return
-    # Anything accepted must parse as pure tag clauses: no operator/field smuggled in.
-    assert len(q) <= 512
-    _compile_query(q)                              # the Freshdesk-grammar parser accepts it
-    body = q[1:-1]
-    clauses = body[1:-1].split(" OR ") if body.startswith("(") else [body]
-    assert len(clauses) == len(tags)
-    for clause, tag in zip(clauses, tags, strict=True):
-        assert clause == f"tag:'{tag}'"
+        pass
 
 
-@FAST
-@given(st.text(max_size=2000))
-def test_html_to_text_never_crashes_and_strips_tags(s):
-    out = html_to_text(s)
-    if "&" not in s:            # without entities, no tag can survive conversion
-        assert re.search(r"<[A-Za-z/!][^>]*>", out) is None
+@given(st.text(max_size=200))
+@SETTINGS
+def test_search_either_validates_or_raises(text):
+    try:
+        out = q.clean_search(text)
+        assert out is None or len(out) <= q.MAX_SEARCH_LEN
+    except InvalidRequest:
+        pass
 
 
-@FAST
-@given(st.emails())
-def test_mask_pii_hides_every_email(email):
-    local, domain = email.rsplit("@", 1)
-    masked = mask_pii(f"contact {email} now")
-    assert f"contact {local[0]}***@{domain} now" == masked     # whole local part hidden but the first char
+@given(st.dictionaries(st.text(max_size=12), st.text(max_size=40), max_size=8))
+@SETTINGS
+def test_derive_never_raises_on_arbitrary_orders(blob):
+    sig = derive(dict(blob))
+    assert sig.payment_state in {
+        "unknown", "paid", "failed", "cancelled", "fully_refunded",
+        "partially_refunded", "awaiting_payment",
+    }
+    json.dumps(sig.to_dict(), default=str)
 
 
-def test_mask_pii_regressions():
-    assert mask_pii("o'brien@example.com") == "o***@example.com"
-    assert mask_pii("mail a!b#c@x.co.in") == "mail a***@x.co.in"
-
-
-@FAST
-@given(st.text(max_size=3000))
-def test_detectors_are_total_and_fast(s):
-    guardrails.looks_like_injection(s)
-    extract_payment_refs(s)
-    classify_intent(s)
-
-
-@FAST
-@given(st.lists(st.dictionaries(st.text(max_size=5), st.text(max_size=200), max_size=4), max_size=200),
-       st.integers(min_value=200, max_value=20_000))
-def test_size_budget_property(items, budget):
-    import json
-    out, _ = guardrails.fit_to_budget({"items": items}, budget)
-    assert len(json.dumps(out, ensure_ascii=False, default=str)) <= max(budget, 300)
+@given(st.lists(st.dictionaries(st.text(max_size=6), st.text(max_size=60), max_size=4), max_size=60))
+@SETTINGS
+def test_fit_response_always_returns_valid_json(items):
+    out = fit_response({"items": items}, budget=800)
+    json.dumps(out, default=str)
+    assert len(out["items"]) <= len(items)

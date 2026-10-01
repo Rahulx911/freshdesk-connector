@@ -1,106 +1,115 @@
-"""Behaviour pinned to the official Freshdesk API v2 docs
-(https://developers.freshdesk.com/api/), checked 2026-10-01. Each test names
-the doc statement it guards, because the mock alone can't prove we match the
-real API."""
+"""Facts about the real WooCommerce REST API that this connector depends on.
+
+These are pinned deliberately. Each one is a place where a plausible-looking
+implementation is wrong against the real store, and where the bug would only
+appear in production against a merchant's live shop.
+"""
+
+from __future__ import annotations
 
 import httpx
 import pytest
 
-from freshdesk_connector.client import RateLimiter, request_cost
-from freshdesk_connector.errors import InvalidRequest
-from freshdesk_connector.query import build_ticket_query
-from mock_server import data as D
+from woocommerce_connector import query as q
+from woocommerce_connector.auth import Credentials
+from woocommerce_connector.client import WooClient, _map_client_error
+from woocommerce_connector.errors import AuthError, NotFound, PermissionDenied
+from woocommerce_connector.normalize import ORDER_URL_HPOS, ORDER_URL_LEGACY, order_url
+
+CREDS = Credentials("https://shop.example.com", "ck_x", "cs_y")
 
 
-# Docs, "Rate Limit": example headers are decimals, e.g. "X-Ratelimit-Total: 700.0"
-def test_decimal_rate_limit_headers_are_parsed():
-    rl = RateLimiter(limit_per_min=50)
-    rl.observe_headers(httpx.Headers({"X-Ratelimit-Total": "700.0", "X-Ratelimit-Remaining": "426.0"}))
-    assert rl.limit == 700 and rl.server_remaining == 426 and rl.budget == 560
+def test_namespace_is_wc_v3():
+    """WooCommerce lives under /wp-json/wc/v3, not /api or /wc-api."""
+    assert CREDS.api_base().endswith("/wp-json/wc/v3")
 
 
-# Docs, "List All Tickets": "Each include will consume an additional 2 credits ... stats ...
-# total of 3 API credits"; "View a Ticket": "Including conversations will consume two API calls"
-@pytest.mark.parametrize("params,cost", [
-    ({}, 1), ({"include": "stats"}, 3), ({"include": "requester,stats"}, 5),
-    ({"include": "conversations"}, 2),
-])
-def test_include_credit_costs(params, cost):
-    assert request_cost(params) == cost
+def test_per_page_hard_cap_is_100():
+    """WooCommerce rejects per_page > 100 with a 400. We stop it client side."""
+    assert q.MAX_PER_PAGE == 100
 
 
-async def test_connector_counts_credits_like_server(make_service):
-    svc = make_service()
-    await svc.get_ticket(1, max_conversations=5)   # ticket_fields(1) + ticket w/ requester,stats(5) + convs(1)
-    assert svc.c.rl.used() == 7 == len(svc.mock_state["hits"])
+def test_pagination_uses_wp_headers_not_a_body_envelope():
+    """Unlike most APIs, WooCommerce returns a bare JSON array and puts the
+    paging metadata in X-WP-Total / X-WP-TotalPages / Link."""
+    def handler(request):
+        return httpx.Response(
+            200, json=[{"id": 1}],
+            headers={"X-WP-Total": "57", "X-WP-TotalPages": "6",
+                     "Link": '<https://shop.example.com/wp-json/wc/v3/orders?page=2>; rel="next"'},
+        )
+
+    async def run():
+        c = WooClient(CREDS, transport=httpx.MockTransport(handler))
+        data, info = await c.get_page("/orders")
+        await c.aclose()
+        return data, info
+
+    import asyncio
+    data, info = asyncio.run(run())
+    assert isinstance(data, list)
+    assert info == {"total": 57, "total_pages": 6, "has_more": True}
 
 
-async def test_include_heavy_calls_respect_budget(make_service, clock):
-    # Budget 8 credits/min. Two get_ticket calls cost 1 + 6 + 6 = 13 > 8,
-    # so the second must wait client-side instead of drawing a 429.
-    svc = make_service(server_limit=10, client_limit=10, max_wait_s=120)
-    await svc.get_ticket(1, max_conversations=5)
-    await svc.get_ticket(2, max_conversations=5)
-    assert clock.sleeps, "expected a proactive wait"
-    assert svc.mock_state["requests"] == 5      # no 429 round-trips
+def test_error_envelope_shape():
+    """`{"code", "message", "data": {"status"}}` is WooCommerce's envelope."""
+    resp = httpx.Response(404, json={"code": "woocommerce_rest_invalid_id",
+                                     "message": "Invalid ID.", "data": {"status": 404}})
+    err = _map_client_error(resp)
+    assert isinstance(err, NotFound)
+    assert err.details["woocommerce_code"] == "woocommerce_rest_invalid_id"
 
 
-# Docs, "Ticket fields": status choices are account-specific ("6": ["Waiting on Customer", ...])
-async def test_custom_statuses_loaded_from_ticket_fields(make_service):
-    svc = make_service()
-    statuses = await svc.statuses()
-    assert statuses[6] == "waiting_on_customer" and statuses[2] == "open"
-    res = await svc.search_tickets(status=["waiting_on_customer"])
-    assert res["count"] > 0 and all(t["status"] == "waiting_on_customer" for t in res["items"])
+def test_cannot_view_is_permission_not_auth_even_at_401():
+    """Hosts disagree on the status for woocommerce_rest_cannot_view: some
+    send 401, some 403. The code is what distinguishes a scoped-out key from
+    a revoked one, so we branch on the code first."""
+    for status in (401, 403):
+        resp = httpx.Response(status, json={"code": "woocommerce_rest_cannot_view",
+                                            "message": "Sorry, you cannot view this resource.",
+                                            "data": {"status": status}})
+        assert isinstance(_map_client_error(resp), PermissionDenied)
 
 
-async def test_status_fallback_when_fields_forbidden(make_service):
-    svc = make_service()
-    svc.mock_state["deny_ticket_fields"] = True
-    t = await svc.get_ticket(7, include_conversations=False)     # ticket 7 has custom status 6
-    assert t["status"] == "status_6"                             # unknown, but not mislabelled
-    with pytest.raises(InvalidRequest) as e:
-        await svc.search_tickets(status=["waiting_on_customer"])
-    assert "open" in e.value.message                             # tells the model what IS valid
+def test_bad_credentials_map_to_auth_error():
+    resp = httpx.Response(401, json={"code": "woocommerce_rest_authentication_error",
+                                     "message": "Consumer key is invalid.",
+                                     "data": {"status": 401}})
+    assert isinstance(_map_client_error(resp), AuthError)
 
 
-# Docs, "Filter Tickets": ':>' is "greater than or equal to", ':<' "less than or equal to"
-async def test_date_bounds_are_inclusive(make_service):
-    day = D.TICKETS[10]["created_at"][:10]
-    res = await make_service().search_tickets(created_after=day, created_before=day)
-    assert 10 + 1 in {t["id"] for t in res["items"]}
+def test_guest_orders_have_customer_id_zero():
+    """Guest checkouts are customer_id 0, not null. A truthiness check would
+    silently treat every guest order as belonging to customer 0."""
+    from mock_server import data as mock_data
+    guests = [o for o in mock_data.ORDERS if o["customer_id"] == 0]
+    assert guests, "fixture must contain guest orders"
+    assert all(o["customer_id"] is not None for o in guests)
 
 
-# Docs, "Filter Tickets": "To filter for fields with no values assigned, use the null keyword"
-async def test_unassigned_filter(make_service):
-    res = await make_service().search_tickets(unassigned=True)
-    assert res["count"] > 0 and all("responder_id" not in t for t in res["items"])
-    assert 'agent_id:null' in res["query"]
-    with pytest.raises(InvalidRequest):
-        build_ticket_query(unassigned=True, agent_id=5)
+def test_hpos_and_legacy_admin_urls_differ():
+    """WooCommerce 8.2+ moved orders out of wp_posts. The legacy post.php
+    link 404s on an HPOS store, so the style must be configurable."""
+    assert "page=wc-orders" in ORDER_URL_HPOS
+    assert "post.php" in ORDER_URL_LEGACY
+    assert order_url("https://s.example.com", 7) != order_url("https://s.example.com", 7, hpos=False)
 
 
-# Docs, "Filter Tickets": query "can have up to 512 characters"; page "should not exceed 10"
-def test_query_length_cap():
-    with pytest.raises(InvalidRequest):
-        build_ticket_query(tags=[f"tag{i:03d}" for i in range(60)])
+def test_customer_role_defaults_to_all():
+    """Customers who checked out without registering have no WP role; the
+    default role filter would hide them."""
+    assert q.build_customer_query()["role"] == "all"
 
 
-# Docs, "List All Contacts": filter by phone/mobile is an exact value match
-@pytest.mark.parametrize("query,name", [
-    ("+91 90000 00005", "Ishita Rao"),     # exact stored format
-    ("+91-90000-00005", "Ishita Rao"),     # different punctuation -> canonical +91 variant
-    ("+91 98765 43210", "Divya Menon"),    # stored as bare 10 digits
-    ("09876543210", "Divya Menon"),        # trunk prefix
-])
-async def test_phone_lookup_variants(make_service, query, name):
-    res = await make_service().find_contacts(phone=query)
-    assert res["items"] and res["items"][0]["name"] == name
+def test_order_date_filters_are_site_local_iso_without_timezone():
+    """WooCommerce's after/before compare against the site timezone and
+    reject a trailing Z on some versions, so we send a naive timestamp."""
+    out = q.to_iso8601("2026-03-04T11:22:33Z", "after")
+    assert out == "2026-03-04T11:22:33"
+    assert not out.endswith("Z")
 
 
-# Docs, "List All Tickets": "only tickets that have been created within the past 30 days"
-async def test_thirty_day_default_window(make_service):
-    svc = make_service()
-    recent = await svc.list_tickets(per_page=100)
-    everything = await svc.list_tickets(per_page=100, updated_since="2000-01-01T00:00:00Z")
-    assert recent["count"] < everything["count"]
+@pytest.mark.parametrize("status", ["trash", "checkout-draft"])
+def test_internal_statuses_are_not_exposed(status):
+    """An agent must never quote a deleted order or an abandoned draft."""
+    assert status not in q.ORDER_STATUSES
