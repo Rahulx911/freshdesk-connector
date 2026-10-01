@@ -1,23 +1,32 @@
 # Freshdesk connector for Agent Studio
 
-A private, **read-only** connector that lets an Agent Studio agent read a merchant's Freshdesk **tickets, ticket conversations, contacts and companies**. It's exposed as an **MCP server** with 10 tools.
+A production-grade, **read-only** connector that lets Agent Studio agents read a merchant's Freshdesk **tickets, conversations, contacts and companies** through **MCP**. It covers Razorpay's Forward-Deployed Engineer assignment, Option 3.
 
-Built for Razorpay's Forward-Deployed Engineer assignment (Option 3).
+[![ci](https://github.com/Rahulx911/freshdesk-connector/actions/workflows/ci.yml/badge.svg)](https://github.com/Rahulx911/freshdesk-connector/actions/workflows/ci.yml)
 
 ```
-Agent Studio agent ──MCP (stdio / streamable HTTP)──▶ freshdesk-connector ──HTTPS + API key──▶ <merchant>.freshdesk.com
-                                                        │ auth · rate limiter · retries
-                                                        │ safe query builder · normalizer · PII mask
+Agent Studio agent ──MCP (HTTPS + bearer token)──▶ connector replicas ──HTTPS + API key──▶ merchant.freshdesk.com
+                                                    │ token → tenant · credit budget (Redis, shared)
+                                                    │ safe queries · guardrails · audit + metrics
 ```
 
-| Requirement | Where |
+## What's in it
+
+| Assignment asks for | Where |
 |---|---|
-| Auth flow (API key) | `auth.py`, `freshdesk-connector auth login/status/logout` |
-| list / get / search primitives | `service.py`: `list_tickets`, `search_tickets`, `get_ticket`, `list_ticket_conversations`, `find_contacts`, `get_contact`, `customer_ticket_history`, `find_companies`, `get_company`, `connector_status` |
-| Rate-limit handling | `client.py` (`RateLimiter` + 429/`Retry-After` + bounded wait) |
+| OAuth / API-key auth flow | API key validated against `/agents/me` before saving (`auth login`); `0600` store or env or secret files. Hosted mode adds **bearer-token auth per agent, bound to one merchant** via MCP's OAuth resource-server hooks (`tenancy.py`). |
+| list / get / search primitives | 10 tools: `list_tickets`, `search_tickets`, `get_ticket`, `list_ticket_conversations`, `find_contacts`, `get_contact`, `customer_ticket_history`, `find_companies`, `get_company`, `connector_status` |
+| Rate-limit handling | Budget counted in **API credits** (Freshdesk charges `include`s extra), learned from the account's headers, 20% reserve for the merchant's other apps, **shared across replicas through an atomic Redis script**, `Retry-After`, bounded waits that fail fast with `retry_after_seconds` |
 | MCP tool specification | `mcp_server.py`; exported JSON in [`docs/mcp_tool_spec.json`](docs/mcp_tool_spec.json) |
 | What the agent can / can't do | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) |
-| Working test script | `scripts/demo.py` (end-to-end over MCP) + `tests/` (73 pytest cases). Results in [`docs/TESTING.md`](docs/TESTING.md) |
+| Working test script | `scripts/demo.py` (end-to-end over MCP), 118 automated tests, agent evals, load test, compose smoke test. See [`docs/TESTING.md`](docs/TESTING.md) |
+
+Production extras:
+- **LLM guardrails:** customer-written text is flagged when it looks like prompt injection; private notes are withheld by default; responses have a size budget; there are no write tools.
+- **Observability:** JSON audit log per tool call (PII-masked), Prometheus `/metrics`, `/healthz`, `/readyz`.
+- **Agent eval harness:** 15 merchant scenarios scored on tool choice, arguments, facts and safety. Oracle mode runs in CI; LLM mode runs with Claude when an API key is present.
+- **Supply chain and runtime:** hash-pinned lockfile, `pip-audit`, `bandit`, `ruff`, `mypy`. The Docker image runs non-root with a read-only filesystem, and compose runs 2 replicas plus Redis.
+- Docs: [architecture](docs/ARCHITECTURE.md), [security model](docs/SECURITY.md), [runbook](docs/RUNBOOK.md), [FDE rollout playbook](docs/FDE_PLAYBOOK.md).
 
 ## Quick start (no Freshdesk account needed)
 
@@ -25,102 +34,71 @@ Agent Studio agent ──MCP (stdio / streamable HTTP)──▶ freshdesk-connec
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-pytest -q                      # 73 tests: auth, primitives, search, rate limits, API-doc conformance, MCP (stdio + HTTP)
-python scripts/demo.py         # spins up a mock Freshdesk + the MCP server, calls every tool
+pytest -q                       # 118 tests (Redis tests need redis-server; skipped otherwise)
+python scripts/demo.py          # mock Freshdesk + MCP server, every tool, ends "21/21 checks passed"
+python -m evals.run --oracle    # agent eval dataset against the connector, "15/15 passed"
 ```
 
-`scripts/demo.py` starts the bundled mock Freshdesk (`mock_server/`, fictional data for a made-up tea brand). It then launches the connector **as an MCP stdio server** and calls every tool through a real MCP client session, the same way an agent runtime does. It covers:
-- happy paths for every tool, including pagination;
-- failure cases: unknown id, an injection attempt in a search tag, an invalid enum, ambiguous arguments, and a wrong API key;
-- rate limiting against a 10 req/min account: the connector throttles itself at 8 and then returns a structured `rate_limited` error.
+## Use it
 
-Expected output ends with `21/21 checks passed`.
+**Local, one merchant (stdio).** This is what an MCP client launches:
 
-## Using a real Freshdesk account
+```bash
+freshdesk-connector auth login --domain yourcompany     # key prompt hidden; verified before saving
+freshdesk-connector serve                               # stdio
+```
 
-1. Get the API key in Freshdesk: profile picture → **Profile settings** → **View API key**. Use a dedicated integration agent with read access to all tickets if you can.
-2. Authenticate. The key is checked against `GET /api/v2/agents/me` before it is saved:
-   ```bash
-   freshdesk-connector auth login --domain yourcompany      # key prompt is hidden
-   freshdesk-connector auth status
-   ```
-   Credentials are stored in `~/.config/freshdesk-connector/credentials.json` with mode `0600`. Alternatively, set `FRESHDESK_DOMAIN` and `FRESHDESK_API_KEY`; environment variables take precedence, which suits containers and secret managers.
-3. Run the read-only live demo:
-   ```bash
-   FRESHDESK_DOMAIN=yourcompany FRESHDESK_API_KEY=... python scripts/demo.py --live
-   ```
-4. Register with an agent runtime. Any MCP client works; example config:
-   ```json
-   {
-     "mcpServers": {
-       "freshdesk": {
-         "command": "freshdesk-connector",
-         "args": ["serve"],
-         "env": { "FRESHDESK_DOMAIN": "yourcompany", "FRESHDESK_API_KEY": "${secret:freshdesk}" }
-       }
-     }
-   }
-   ```
-   For a hosted deployment use `freshdesk-connector serve --transport streamable-http --port 8000`.
+```json
+{"mcpServers": {"freshdesk": {"command": "freshdesk-connector", "args": ["serve"]}}}
+```
 
-### Configuration
+**Hosted, many merchants (streamable HTTP):**
+
+```bash
+freshdesk-connector token create --tenant acme --name agent-studio-acme-prod   # token shown once
+freshdesk-connector serve --transport streamable-http --host 0.0.0.0 --port 8000 \
+    --tenants deploy/tenants.json            # see deploy/tenants.example.json
+# or: docker compose up   (2 replicas + Redis + mock; scripts/smoke_compose.sh runs it end to end)
+```
+
+The server refuses to listen on a public interface without a tenant registry. Onboarding, key rotation and alerts are in the [runbook](docs/RUNBOOK.md).
+
+**Against a real Freshdesk (read-only):**
+`FRESHDESK_DOMAIN=yourtrial FRESHDESK_API_KEY=... python scripts/demo.py --live`
+
+## Configuration
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `FRESHDESK_DOMAIN` / `FRESHDESK_API_KEY` | – | Credentials (override the stored ones) |
-| `FRESHDESK_RATE_RESERVE` | `0.2` | Share of the account's per-minute quota left for the merchant's other apps |
-| `FRESHDESK_MAX_WAIT_S` | `20` | Longest a single tool call may wait on rate limits or retries before returning `rate_limited` |
-| `FRESHDESK_REDACT_PII` | `false` | Mask emails and phone numbers in tool output |
-| `FRESHDESK_MAX_BODY_CHARS` | `2000` | Truncation limit for descriptions and messages |
-| `LOG_LEVEL` | `WARNING` | Logs go to stderr; the API key is never logged |
+| `FRESHDESK_DOMAIN`, `FRESHDESK_API_KEY` | – | stdio-mode credentials (override `auth login`) |
+| `FRESHDESK_TENANTS_FILE` / `--tenants` | – | Tenant registry for hosted mode (no secrets inside) |
+| `REDIS_URL` | – | Shared rate budget across replicas (required with >1 replica) |
+| `FRESHDESK_RATE_RESERVE` | `0.2` | Share of the account quota left for the merchant's other apps |
+| `FRESHDESK_MAX_WAIT_S` | `20` | Longest a tool call may wait before returning `rate_limited` |
+| `FRESHDESK_PRIVATE_NOTES` | `exclude` | `include` only for internal copilots (per tenant in hosted mode) |
+| `FRESHDESK_REDACT_PII` | `false` | Mask emails/phones in output (per tenant in hosted mode) |
+| `FRESHDESK_MAX_BODY_CHARS` / `FRESHDESK_MAX_RESPONSE_CHARS` | `2000` / `60000` | Per-message truncation / per-response size budget |
+| `METRICS_TOKEN` or `METRICS_TOKEN_FILE` | – | Bearer token for `/metrics` |
+| `MCP_PUBLIC_URL`, `MCP_ALLOWED_HOSTS` | – | OAuth resource metadata URL; DNS-rebinding protection |
+| `LOG_LEVEL`, `LOG_FORMAT`, `AUDIT_LOG` | `WARNING`, `text`, `on` | Use `json` in production; keep the audit log on |
 
-## Design decisions
+## Assumptions and limitations
 
-- **Read-only first.** A support agent that can only read is low-risk and still answers most of the questions merchants actually ask ("where's my order/refund?", "what's open and urgent?"). Write actions come later, behind approval.
-- **No free-form query strings from the model.** Freshdesk search uses a mini query language. Tools take typed arguments (enums for status and priority, ISO dates, allow-listed characters for tags), and `query.py` builds the query string. This blocks injection (`tag:'x' OR status:5`) and removes syntax errors.
-- **Shaped for an LLM.** Enum codes become words, HTML becomes text, long bodies are truncated, and empty fields are dropped. Pagination is explicit, and there are warnings when Freshdesk's limits mean the agent sees only part of the data.
-- **Errors the model can act on.** Every error carries a code, a message and a `hint` (see CAPABILITIES.md).
-- **Polite with a shared quota.** The connector keeps a 20% reserve, so it can't starve the merchant's other Freshdesk apps. The budget is counted in API *credits*, because Freshdesk charges extra for `include`.
-- **Statuses come from the account.** Custom statuses ("Waiting on Customer", …) are read from `/ticket_fields`, so they're never hard-coded.
-- **One composite tool.** `customer_ticket_history(email)` covers the most common opening question in one call instead of two.
-
-## Assumptions
-
-- Freshdesk API v2 with API-key Basic auth (`key:X`). Freshdesk has no OAuth grant for its own REST API, so the "auth flow" here is: validate the key, store it securely, revoke it with `logout`. On the Freshworks side, the merchant revokes it by resetting the key.
-- One merchant per server process. Multi-tenant hosting is covered under "Long-term" below.
-- Data in `mock_server/` is entirely fictional. No real customer data, keys or credentials are included anywhere in this repo.
-
-## Limitations
-
-- Read-only; no attachments, KB, canned responses or satisfaction data (see CAPABILITIES.md).
-- No full-text search, because Freshdesk's API doesn't provide it. Search also skips archived tickets, and new changes take a few minutes to become searchable.
-- Phone lookup only matches the number as it was stored. The connector tries common formats (raw, digits, last 10 digits, +91 variants), but an unusual stored format can still miss.
-- Search returns at most 300 results per query (Freshdesk limit).
-- Rate-limit state is per process. Several replicas sharing one account would each assume they have the full budget.
-- The mock server implements only the subset of Freshdesk behaviour this connector uses. It is a test double, not a full emulator.
-
-## Long-term
-
-1. **Multi-tenant hosting inside Agent Studio.** Run as one streamable-HTTP service. Put per-merchant keys in a secrets manager (KMS-encrypted), selected by tenant id on each request. Keep the rate-limit budget in Redis, keyed by Freshdesk domain, so replicas share it.
-2. **Writes with a human in the loop.** Add `add_private_note`, `reply_to_ticket` and `update_ticket_status` as separate tools marked `destructiveHint`. Draft first, then require the merchant agent's approval in Agent Studio before the call is made. Log every write with the agent run id.
-3. **Events instead of polling.** Freshdesk automations or webhooks trigger Agent Studio runs on ticket create or update.
-4. **Freshworks Marketplace app with OAuth.** For Freshworks-native OAuth and per-merchant install, package this as a Marketplace app.
-5. **Evals.** Build a fixed set of merchant questions with expected tool calls and answers, run against the mock in CI, to catch prompt and tool-description regressions.
+- Freshdesk API v2 with API-key Basic auth (`key:X`). Freshdesk has no merchant-facing OAuth grant for its REST API, so the OAuth piece is on the **agent → connector** side (bearer tokens per agent). Behaviour was checked against the official API reference; see [TESTING.md](docs/TESTING.md).
+- Read-only. No attachment download, KB articles or satisfaction data yet.
+- Freshdesk search has no full-text search, returns at most 300 results, skips archived tickets, and indexes with a short delay. Phone lookup only matches numbers in the format they were stored (common Indian formats are tried).
+- The prompt-injection detector is heuristic; the real safety boundary is that there are no write tools and the tenant comes from the token.
+- Everything is tested against a faithful mock and the docs. **No live Freshdesk account was used**; run `demo.py --live` on a trial account to close that gap.
 
 ## Layout
 
 ```
-src/freshdesk_connector/
-  auth.py         API-key validation, 0600 credential store, env override
-  client.py       async HTTP client, RateLimiter, retries, error mapping
-  query.py        safe Freshdesk search-query builder
-  normalize.py    enum mapping, HTML→text, truncation, PII masking
-  service.py      list/get/search primitives
-  mcp_server.py   MCP tools + server instructions
-  cli.py          auth login|status|logout, serve, export-spec
-mock_server/      FastAPI Freshdesk test double + fictional data
-scripts/demo.py   end-to-end MCP demo (mock or --live)
-tests/            pytest suite
-docs/             CAPABILITIES.md, TESTING.md, mcp_tool_spec.json
-.github/workflows CI: tests + demo on Python 3.10–3.13
+src/freshdesk_connector/   auth, tenancy, ratelimit, client, query, service, normalize,
+                           guardrails, observability, mcp_server, cli
+mock_server/               Freshdesk test double (fictional data, real limits/headers/search syntax)
+evals/                     agent eval dataset + harness (oracle and LLM modes)
+scripts/                   demo.py, loadtest.py, smoke_compose.sh
+tests/                     118 tests: unit, API-conformance, CLI, production (auth/Redis/guardrails), evals
+docs/                      CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, FDE_PLAYBOOK, TESTING, tool spec
+Dockerfile, docker-compose.yml, deploy/, requirements.lock, .github/workflows/ci.yml
 ```
