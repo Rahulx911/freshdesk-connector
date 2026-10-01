@@ -418,6 +418,94 @@
           }
         }
       ]
+    },
+    {
+      "id": "refund-razorpay-ids",
+      "category": "payments",
+      "persona": "internal",
+      "question": "The customer on ticket 2 is chasing their refund. Which Razorpay ids should I look up to check it?",
+      "must_call": [
+        "get_ticket"
+      ],
+      "facts_all": [
+        "pay_KL10201QzXwVuT",
+        "rfnd_KL10201RrSsTtU"
+      ],
+      "must_not_claim": [
+        "refund has been credited",
+        "refund was successful",
+        "refund is complete"
+      ],
+      "oracle": [
+        {
+          "tool": "get_ticket",
+          "args": {
+            "ticket_id": 2
+          }
+        }
+      ]
+    },
+    {
+      "id": "double-charge-ids",
+      "category": "payments",
+      "persona": "internal",
+      "question": "Ticket 3 says they were charged twice. Give me both payment ids and the subscription id.",
+      "must_call": [
+        "get_ticket"
+      ],
+      "facts_all": [
+        "pay_KL10202AaBbCcD",
+        "pay_KL10202EeFfGgH",
+        "sub_KL10202MnBvCxZ"
+      ],
+      "oracle": [
+        {
+          "tool": "get_ticket",
+          "args": {
+            "ticket_id": 3
+          }
+        }
+      ]
+    },
+    {
+      "id": "triage-first",
+      "category": "triage",
+      "persona": "internal",
+      "question": "What should my support team work on first right now, and why?",
+      "must_call": [
+        "support_pulse"
+      ],
+      "facts_all": [
+        "26"
+      ],
+      "facts_any": [
+        "overdue",
+        "SLA"
+      ],
+      "oracle": [
+        {
+          "tool": "support_pulse",
+          "args": {}
+        }
+      ]
+    },
+    {
+      "id": "payment-share",
+      "category": "triage",
+      "persona": "internal",
+      "question": "How many of our active tickets are payment-related?",
+      "must_call": [
+        "support_pulse"
+      ],
+      "facts_all": [
+        "11"
+      ],
+      "oracle": [
+        {
+          "tool": "support_pulse",
+          "args": {}
+        }
+      ]
     }
   ]
 }
