@@ -1,0 +1,546 @@
+{
+  "server": {
+    "name": "freshdesk",
+    "instructions": "Read-only access to the merchant's Freshdesk helpdesk: tickets, ticket\nconversations, contacts (customers) and companies.\n\nHow to use:\n- Customer asks \"what's happening with my issue?\" -> customer_ticket_history(email)\n  then get_ticket(id) for the one that matters.\n- Filtering by status/priority/tag/date -> search_tickets (structured filters, max 300 results).\n- Browsing recent activity -> list_tickets(updated_since=...).\n- Statuses: open, pending, resolved, closed, waiting_on_customer, waiting_on_third_party.\n- Priorities: low, medium, high, urgent.\n\nLimits: cannot create, reply to, update or delete anything. Cannot full-text\nsearch ticket bodies. If a tool returns error=rate_limited, wait\nretry_after_seconds before calling ANY Freshdesk tool again. Private notes are\ninternal agent notes (private_note=true): never quote them to the end customer.\n"
+  },
+  "tools": [
+    {
+      "name": "list_tickets",
+      "description": "List tickets, newest activity first. Use for browsing recent tickets or a\n    customer's/company's tickets. For status/priority/tag filters use search_tickets.",
+      "inputSchema": {
+        "properties": {
+          "updated_since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ISO-8601 timestamp; only tickets updated after it. Without it Freshdesk returns only tickets created in the last 30 days.",
+            "title": "Updated Since"
+          },
+          "requester_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only tickets raised by this email",
+            "title": "Requester Email"
+          },
+          "company_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Only tickets for this company id",
+            "title": "Company Id"
+          },
+          "order_by": {
+            "default": "updated_at",
+            "enum": [
+              "created_at",
+              "updated_at",
+              "due_by",
+              "status"
+            ],
+            "title": "Order By",
+            "type": "string"
+          },
+          "order": {
+            "default": "desc",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "title": "Order",
+            "type": "string"
+          },
+          "page": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "per_page": {
+            "default": 30,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Per Page",
+            "type": "integer"
+          }
+        },
+        "title": "list_ticketsArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "search_tickets",
+      "description": "Search tickets by structured filters (AND across fields, OR within a list).\n    Returns total_matches. Does NOT search subject/description text.",
+      "inputSchema": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "open",
+                    "pending",
+                    "resolved",
+                    "closed",
+                    "waiting_on_customer",
+                    "waiting_on_third_party"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Match any of these statuses",
+            "title": "Status"
+          },
+          "priority": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "urgent"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Match any of these priorities",
+            "title": "Priority"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Match any of these tags",
+            "title": "Tags"
+          },
+          "ticket_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Ticket type, e.g. 'Refund', 'Question'",
+            "title": "Ticket Type"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Assigned agent id",
+            "title": "Agent Id"
+          },
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Assigned group id",
+            "title": "Group Id"
+          },
+          "created_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ISO date YYYY-MM-DD",
+            "title": "Created After"
+          },
+          "created_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ISO date YYYY-MM-DD",
+            "title": "Created Before"
+          },
+          "updated_after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ISO date YYYY-MM-DD",
+            "title": "Updated After"
+          },
+          "updated_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ISO date YYYY-MM-DD",
+            "title": "Updated Before"
+          },
+          "due_before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "ISO date YYYY-MM-DD",
+            "title": "Due Before"
+          },
+          "page": {
+            "default": 1,
+            "description": "30 results per page, max 10 pages",
+            "maximum": 10,
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          }
+        },
+        "title": "search_ticketsArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "get_ticket",
+      "description": "Get one ticket with description, requester, SLA stats and its conversation\n    thread (customer replies, agent replies and private notes).",
+      "inputSchema": {
+        "properties": {
+          "ticket_id": {
+            "minimum": 1,
+            "title": "Ticket Id",
+            "type": "integer"
+          },
+          "include_conversations": {
+            "default": true,
+            "title": "Include Conversations",
+            "type": "boolean"
+          },
+          "max_conversations": {
+            "default": 20,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Max Conversations",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ticket_id"
+        ],
+        "title": "get_ticketArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "list_ticket_conversations",
+      "description": "Page through a long ticket thread oldest-first (use after get_ticket reports\n    conversations_truncated=true).",
+      "inputSchema": {
+        "properties": {
+          "ticket_id": {
+            "minimum": 1,
+            "title": "Ticket Id",
+            "type": "integer"
+          },
+          "page": {
+            "default": 1,
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "per_page": {
+            "default": 30,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Per Page",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ticket_id"
+        ],
+        "title": "list_ticket_conversationsArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "find_contacts",
+      "description": "Find customers (contacts) by exactly one of email, phone, or name.",
+      "inputSchema": {
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Exact email",
+            "title": "Email"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Phone or mobile number",
+            "title": "Phone"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Name prefix (autocomplete)",
+            "title": "Name"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 25,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "find_contactsArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "get_contact",
+      "description": "Get one customer (contact) by id.",
+      "inputSchema": {
+        "properties": {
+          "contact_id": {
+            "minimum": 1,
+            "title": "Contact Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contact_id"
+        ],
+        "title": "get_contactArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "customer_ticket_history",
+      "description": "One call for 'who is this customer and what have they raised?': the contact\n    record plus their most recently updated tickets and a count by status.",
+      "inputSchema": {
+        "properties": {
+          "email": {
+            "description": "Customer email",
+            "title": "Email",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "customer_ticket_historyArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "get_company",
+      "description": "Get one company (B2B account) by id.",
+      "inputSchema": {
+        "properties": {
+          "company_id": {
+            "minimum": 1,
+            "title": "Company Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "company_id"
+        ],
+        "title": "get_companyArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "find_companies",
+      "description": "Find companies by name prefix. Returns ids and names; use get_company for details.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "description": "Company name prefix",
+            "title": "Name",
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "maximum": 25,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "find_companiesArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "connector_status",
+      "description": "Check the connection: which Freshdesk account and agent identity is in use,\n    access level, PII redaction, and current rate-limit headroom.",
+      "inputSchema": {
+        "properties": {},
+        "title": "connector_statusArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    }
+  ]
+}
