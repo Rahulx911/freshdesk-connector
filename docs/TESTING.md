@@ -1,8 +1,9 @@
 # Testing
 
 ```bash
-pytest -q                     # 149 tests, ~5s
+pytest -q                     # 184 tests, ~10s
 python scripts/demo.py        # 26/26 end-to-end over MCP against the mock
+python -m evals.run --oracle  # 19/19 agent scenarios, no API key needed
 ruff check . && mypy && bandit -q -r src
 ```
 
@@ -28,6 +29,8 @@ python scripts/demo.py --live  # 15/15
 | `test_mcp.py` | Tool count, read-only annotations, structured errors, prompts |
 | `test_fuzz.py` | Hypothesis properties: nothing raises, masking never leaks, output is always JSON |
 | `test_production.py` | JSON logs, audit lines, credential never in a response |
+| `test_evals.py` | The eval dataset itself: well-formed cases, no vacuous ones, safety claims guarded |
+| `evals/run.py --oracle` | Each scenario's reference calls, asserting facts are reachable and guardrail flags fire. No model, so it runs in CI |
 
 ## Rules
 

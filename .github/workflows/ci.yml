@@ -37,6 +37,25 @@ jobs:
       - name: End-to-end MCP demo against the mock store
         run: python scripts/demo.py
 
+  evals:
+    name: agent evals
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -e ".[dev]"
+      - name: Oracle mode (no model, no API key)
+        run: python -m evals.run --oracle
+      - name: Model-driven mode (only when the API key secret is configured)
+        if: env.ANTHROPIC_API_KEY != ''
+        run: pip install -e ".[evals]" && python -m evals.run --llm --repeats 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: eval-report, path: "evals/report.*"}
+
   live:
     name: live store (real WordPress + WooCommerce)
     runs-on: ubuntu-latest

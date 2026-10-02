@@ -43,7 +43,8 @@ That is the store refusing, not us.
 ```bash
 python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 python scripts/demo.py        # 26/26 checks
-pytest -q                     # 149 tests
+python -m evals.run --oracle  # 19/19 agent scenarios, no API key needed
+pytest -q                     # 184 tests
 ```
 
 **Against a real WooCommerce**, also with no accounts, because WooCommerce is self-hostable:
@@ -67,6 +68,7 @@ This is the reason WooCommerce was chosen: the whole thing is verifiable end to 
 | Rate-limit handling | WooCommerce core ships **no** rate limiter, so the budget is enforced client side over a sliding 60s window with a 20% reserve, and raised only when the store advertises a real limit. `429` and `503` both honour `Retry-After`; waits are bounded and fail fast with `retry_after_seconds` |
 | MCP tool specification | `mcp_server.py`; exported JSON in [`docs/mcp_tool_spec.json`](docs/mcp_tool_spec.json) |
 | What the agent can and can't do | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) |
+| How I'd roll this out with a merchant | [`docs/FDE_PLAYBOOK.md`](docs/FDE_PLAYBOOK.md) |
 
 ## Layout
 
@@ -86,8 +88,9 @@ src/woocommerce_connector/
   cli.py           auth login|status|logout, serve, export-spec
 deploy/woo-local/  a real WordPress + WooCommerce store in Docker, seeded, with a read-only key
 mock_server/       FastAPI WooCommerce test double (fictional "Kettle & Leaf" data)
-tests/             149 tests including Hypothesis fuzzing and API conformance
-docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, mcp_tool_spec.json
+evals/             19 agent scenarios + harness (oracle mode needs no API key)
+tests/             184 tests including Hypothesis fuzzing and API conformance
+docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, FDE_PLAYBOOK, mcp_tool_spec.json
 ```
 
 ## Honest limitations

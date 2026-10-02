@@ -28,15 +28,17 @@ src/woocommerce_connector/
   cli.py           auth login|status|logout, serve, export-spec
 deploy/woo-local/  real WordPress + WooCommerce in Docker, seeded, mints a Read-scoped key
 mock_server/       FastAPI WooCommerce test double (fictional "Kettle & Leaf" data)
-tests/             149 tests incl. Hypothesis fuzzing and API conformance
-docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, mcp_tool_spec.json
+evals/             19 agent scenarios + harness (oracle mode needs no API key)
+tests/             184 tests incl. Hypothesis fuzzing and API conformance
+docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, FDE_PLAYBOOK, mcp_tool_spec.json
 ```
 
 ## Commands
 
 ```bash
 python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-pytest -q                                   # 149 tests (~5s)
+pytest -q                                   # 184 tests (~10s)
+python -m evals.run --oracle                # expect 19/19 (no API key needed)
 python scripts/demo.py                      # expect "26/26 checks passed"
 ruff check . && mypy && bandit -q -r src    # all must be clean (CI enforces)
 woocommerce-connector export-spec -o docs/mcp_tool_spec.json   # after ANY tool/description change
@@ -68,4 +70,5 @@ python scripts/assert_read_only.py          # proves the key cannot write
 ## Status / next steps
 
 - Done: all Option 3 requirements; **both** auth flows; verified end to end against a real WordPress 7.1 + WooCommerce 11.1 store.
+- **Mock data is the eval ground truth.** `evals/cases.json` asserts facts from `mock_server/data.py`; rerun `python -m evals.run --oracle` after changing either.
 - Not built: shared rate budget across replicas, multi-tenant registry, webhooks, and the Razorpay Payments/Refunds tool that would turn `reconciliation` from advisory into actionable.
