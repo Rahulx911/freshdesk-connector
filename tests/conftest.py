@@ -12,6 +12,31 @@ from woocommerce_connector.service import WooService
 
 STORE_URL = "https://shop.example.com"
 
+# Every environment variable the connectors read. Cleared for every test so a
+# developer who has exported real credentials to run the live demo does not
+# get different results from someone who has not. This bit us: a test that
+# writes credentials to disk and reads them back passed on a clean shell and
+# failed on one with WOO_CONSUMER_SECRET exported, because load() checks the
+# environment first by design.
+CONNECTOR_ENV = (
+    "WOO_STORE_URL", "WOO_CONSUMER_KEY", "WOO_CONSUMER_SECRET",
+    "WOO_CONNECTOR_HOME", "WOO_TENANTS_FILE", "WOO_INSECURE_HTTP_HOSTS",
+    "RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_BASE_URL",
+    "RAZORPAY_CONNECTOR_HOME",
+    "LOG_LEVEL", "LOG_FORMAT", "AUDIT_LOG", "EVAL_MODEL",
+)
+
+
+@pytest.fixture(autouse=True)
+def isolated_environment(monkeypatch):
+    """Run every test against a known-empty environment.
+
+    A test suite whose result depends on the shell it is run from is not a
+    test suite. Tests that need one of these set it themselves.
+    """
+    for name in CONNECTOR_ENV:
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest.fixture
 def creds() -> Credentials:
