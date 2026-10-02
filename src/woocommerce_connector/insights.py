@@ -69,7 +69,12 @@ _META_KEYS = {
     "_razorpay_signature": "signature_present",
 }
 
-_COD_HINTS = ("cod", "cash on delivery", "cheque", "bacs")
+# Indian WooCommerce stores use a wide spread of cash-on-delivery plugin
+# slugs. "bacs" and "cheque" are WooCommerce core offline methods and are
+# deferred payment, not cash, so they are classified separately.
+_COD_SLUGS = ("cod", "cash_on_delivery", "cashondelivery", "wc_cod", "codfee")
+_COD_PHRASES = ("cash on delivery", "cash-on-delivery", "pay on delivery", "pay-on-delivery")
+_OFFLINE_SLUGS = ("bacs", "cheque")
 _RAZORPAY_HINTS = ("razorpay", "rzp")
 
 
@@ -83,6 +88,7 @@ class Signals:
     intent: str | None = None
     intent_evidence: str | None = None
     age: dict[str, Any] = field(default_factory=dict)
+    cod: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {"payment_state": self.payment_state}
@@ -99,6 +105,8 @@ class Signals:
             out["intent_evidence"] = self.intent_evidence
         if self.age:
             out["age"] = self.age
+        if self.cod:
+            out["cash_on_delivery"] = self.cod
         return out
 
 
@@ -159,8 +167,10 @@ def derive(order: dict, *, now: datetime | None = None) -> Signals:
     blob = f"{method} {title}"
     if any(h in blob for h in _RAZORPAY_HINTS):
         sig.gateway = "razorpay"
-    elif any(h in blob for h in _COD_HINTS):
-        sig.gateway = "cash_on_delivery" if "cod" in blob or "cash" in blob else method or None
+    elif any(h in blob for h in _COD_SLUGS) or any(h in blob for h in _COD_PHRASES):
+        sig.gateway = "cash_on_delivery"
+    elif method in _OFFLINE_SLUGS:
+        sig.gateway = method
     elif method:
         sig.gateway = method
 
@@ -275,9 +285,71 @@ def derive(order: dict, *, now: datetime | None = None) -> Signals:
         "days_since_modified": modified_age,
     }.items() if v is not None}
 
+    # ------------------------------------------------- cash on delivery
+    if sig.gateway == "cash_on_delivery":
+        sig.cod = _assess_cod(order, total, created_age, status)
+
     # ------------------------------------------------------------- intent
     sig.intent, sig.intent_evidence = _intent(sig, order, status, created_age)
     return sig
+
+
+# Thresholds are rupee amounts for an Indian direct-to-consumer store. They
+# are constants rather than magic numbers precisely so a merchant can argue
+# with them during onboarding, which is the right conversation to have.
+COD_HIGH_VALUE = 5000.0
+COD_VERY_HIGH_VALUE = 10000.0
+COD_STALE_DAYS = 3.0
+
+
+def _assess_cod(order: dict, total: float | None, age_days: float | None,
+                status: str) -> dict:
+    """Why cash on delivery deserves its own block.
+
+    Cash is roughly half of Indian direct-to-consumer volume, and it is the
+    half that costs the merchant most: the money is not collected, the order
+    can be refused at the door, and return-to-origin is paid for twice. The
+    lever a payment gateway offers is conversion to prepaid before dispatch,
+    which is only worth attempting on some orders. This says which, and why,
+    without pretending to predict anything.
+    """
+    out: dict[str, Any] = {"collected": False}
+    risk: list[str] = []
+
+    if total is not None:
+        if total >= COD_VERY_HIGH_VALUE:
+            risk.append(f"very high value for cash ({total})")
+        elif total >= COD_HIGH_VALUE:
+            risk.append(f"high value for cash ({total})")
+
+    if age_days is not None and age_days >= COD_STALE_DAYS and status in ("on-hold", "pending"):
+        risk.append(f"unconfirmed for {age_days} days")
+
+    billing = order.get("billing") or {}
+    if not (billing.get("phone") or "").strip():
+        risk.append("no phone number, so delivery cannot be confirmed")
+
+    items = [i for i in (order.get("line_items") or []) if isinstance(i, dict)]
+    quantity = sum(int(i.get("quantity") or 0) for i in items)
+    if quantity >= 5:
+        risk.append(f"{quantity} units, which is costly to return")
+
+    out["risk_factors"] = risk
+    out["risk"] = "high" if len(risk) >= 2 else ("elevated" if risk else "normal")
+
+    # The conversion recommendation is deliberately conservative: only
+    # suggest asking for prepayment where the downside of a refused delivery
+    # is real. Nagging every cash customer is how a merchant loses them.
+    if total is not None and total >= COD_HIGH_VALUE and status in ("on-hold", "pending"):
+        out["prepaid_conversion"] = {
+            "worth_attempting": True,
+            "why": (f"Cash order of {total} not yet dispatched. A Razorpay payment link sent "
+                    "before dispatch converts the risk into a settled payment."),
+            "action": "Offer a payment link; dispatch once it is paid.",
+        }
+    else:
+        out["prepaid_conversion"] = {"worth_attempting": False}
+    return out
 
 
 def _intent(sig: Signals, order: dict, status: str, age_days: float | None) -> tuple[str | None, str | None]:
@@ -297,6 +369,9 @@ def _intent(sig: Signals, order: dict, status: str, age_days: float | None) -> t
         return "refund_completed", "order status 'refunded'"
     if sig.payment_state == "awaiting_payment":
         if sig.gateway == "cash_on_delivery":
+            cod = sig.cod or {}
+            if cod.get("risk") == "high":
+                return "cod_at_risk", "cash on delivery: " + "; ".join(cod.get("risk_factors", []))
             return "cod_pending", f"cash on delivery, status '{status}'"
         detail = f"status '{status}'"
         if age_days is not None:
@@ -346,7 +421,15 @@ def attention_score(sig: Signals, order: dict) -> tuple[int, list[str]]:
     if total >= 10000:
         score += 10
         why.append(f"high value order ({sig.amounts.get('currency', 'INR')} {total})")
-    if sig.gateway == "cash_on_delivery" and total >= 5000:
-        score += 10
-        why.append("high value cash on delivery")
+    if sig.gateway == "cash_on_delivery":
+        cod = sig.cod or {}
+        if cod.get("risk") == "high":
+            score += 20
+            why.append("cash on delivery at risk: " + "; ".join(cod.get("risk_factors", [])[:2]))
+        elif cod.get("risk") == "elevated":
+            score += 10
+            why.append("cash on delivery: " + (cod.get("risk_factors") or ["elevated risk"])[0])
+        if (cod.get("prepaid_conversion") or {}).get("worth_attempting"):
+            score += 5
+            why.append("worth converting to prepaid before dispatch")
     return score, why

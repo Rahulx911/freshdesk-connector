@@ -216,6 +216,8 @@ class WooService:
         ranked: list[dict] = []
         at_risk = 0.0            # refunded in the shop, unconfirmed at the gateway
         duplicate_exposure = 0.0  # order value carrying more than one payment
+        cod_uncollected = 0.0     # cash not yet in the merchant's hands
+        cod_convertible: list[dict] = []
 
         for raw in raws:
             sig = derive(raw, now=now)
@@ -253,6 +255,15 @@ class WooService:
                                      "refunded_amount": amount, "total": raw.get("total")})
             if (sig.reconciliation or {}).get("status") == "multiple_payments":
                 duplicate_exposure += (sig.amounts or {}).get("order_total") or 0
+            if sig.gateway == "cash_on_delivery" and sig.payment_state != "paid":
+                value = (sig.amounts or {}).get("order_total") or 0
+                cod_uncollected += value
+                if (sig.cod.get("prepaid_conversion") or {}).get("worth_attempting"):
+                    cod_convertible.append({
+                        "id": raw.get("id"), "number": raw.get("number"),
+                        "total": raw.get("total"),
+                        "risk_factors": sig.cod.get("risk_factors", []),
+                    })
 
         ranked.sort(key=lambda e: (-e["score"], e["id"] or 0))
         total_matching = info.get("total")
@@ -285,7 +296,12 @@ class WooService:
             # already exposed, measured from their own orders, before the
             # agent has answered a single question.
             "money_at_risk": _money_at_risk(currency, at_risk, duplicate_exposure,
-                                            unreconciled, by_intent, complete=complete),
+                                            unreconciled, by_intent, complete=complete,
+                                            cod_uncollected=cod_uncollected),
+            "cash_on_delivery": {
+                "uncollected_value": round(cod_uncollected, 2),
+                "worth_converting_to_prepaid": cod_convertible,
+            } if cod_uncollected else None,
             "needs_attention": ranked[: max(1, min(top, 50))],
         }, list_key="needs_attention")
 
@@ -307,11 +323,13 @@ class WooService:
             out["error"] = getattr(exc, "code", type(exc).__name__)
             out["message"] = str(exc)
         out["rate_budget"] = await self.client.rl.stats()
+        out["cache"] = self.client.cache.stats()
         return out
 
 
 def _money_at_risk(currency: str, unconfirmed: float, duplicate: float,
-                   rows: list[dict], by_intent: dict[str, int], *, complete: bool = True) -> dict:
+                   rows: list[dict], by_intent: dict[str, int], *, complete: bool = True,
+                   cod_uncollected: float = 0.0) -> dict:
     """The headline a shop manager reacts to.
 
     Counting categories is an engineer's summary. A merchant wants the amount
@@ -335,6 +353,15 @@ def _money_at_risk(currency: str, unconfirmed: float, duplicate: float,
             "meaning": ("More than one Razorpay payment id against a single order. The "
                         "customer may have been charged twice."),
         }
+    if cod_uncollected:
+        out["uncollected_cash_on_delivery"] = {
+            "amount": round(cod_uncollected, 2),
+            "meaning": ("Ordered but not paid for. This is not lost money, it is money not yet "
+                        "collected, and some of it will be refused at the door."),
+        }
+    # Deliberately excluded from total_exposed: uncollected cash is a
+    # different kind of number from money that has gone missing, and adding
+    # them together would overstate the problem.
     total = round(unconfirmed + duplicate, 2)
     if complete:
         out["total_exposed"] = total

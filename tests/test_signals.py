@@ -126,3 +126,64 @@ def test_attention_ranks_reconciliation_gap_highest():
     assert 1103 in top_ids   # double charge
     assert 1102 in top_ids   # unconfirmed refund
     assert all(w for _, _, w in scored), "every ranked order must carry reasons"
+
+
+# ------------------------------------------------------- cash on delivery
+def test_cod_block_present_only_for_cash_orders():
+    cash = derive(order(1107))
+    card = derive(order(1101))
+    assert cash.cod and cash.cod["collected"] is False
+    assert not card.cod
+
+
+def test_high_value_cod_is_worth_converting_to_prepaid():
+    """Order 1107 is 7400 on hold: the case a payment link is for."""
+    sig = derive(order(1107))
+    conv = sig.cod["prepaid_conversion"]
+    assert conv["worth_attempting"] is True
+    assert "payment link" in conv["why"].lower()
+    assert conv["action"]
+
+
+def test_cod_risk_factors_are_named_not_scored_silently():
+    sig = derive(order(1107))
+    assert sig.cod["risk"] in ("normal", "elevated", "high")
+    assert sig.cod["risk_factors"], "a non-normal risk must say why"
+
+
+def test_cod_without_a_phone_is_flagged():
+    raw = {
+        "id": 1, "status": "on-hold", "currency": "INR", "total": "800.00",
+        "payment_method": "cod", "payment_method_title": "Cash on delivery",
+        "billing": {"first_name": "A", "last_name": "B", "phone": ""},
+        "line_items": [], "refunds": [], "meta_data": [],
+    }
+    sig = derive(raw)
+    assert any("phone" in f for f in sig.cod["risk_factors"])
+
+
+def test_low_value_cod_is_not_nagged():
+    raw = {
+        "id": 2, "status": "on-hold", "currency": "INR", "total": "300.00",
+        "payment_method": "cod", "payment_method_title": "Cash on delivery",
+        "billing": {"phone": "+91 90000 00000"},
+        "line_items": [{"quantity": 1}], "refunds": [], "meta_data": [],
+    }
+    sig = derive(raw)
+    assert sig.cod["risk"] == "normal"
+    assert sig.cod["prepaid_conversion"]["worth_attempting"] is False
+
+
+@pytest.mark.parametrize("method,title,expected", [
+    ("cod", "Cash on delivery", "cash_on_delivery"),
+    ("cash_on_delivery", "Pay on delivery", "cash_on_delivery"),
+    ("wc_cod", "COD", "cash_on_delivery"),
+    ("bacs", "Direct bank transfer", "bacs"),
+    ("cheque", "Cheque payment", "cheque"),
+])
+def test_cod_plugin_slugs_are_recognised_and_offline_methods_are_not(method, title, expected):
+    """Offline bank transfer is deferred payment, not cash at the door."""
+    raw = {"id": 3, "status": "on-hold", "currency": "INR", "total": "100.00",
+           "payment_method": method, "payment_method_title": title,
+           "billing": {}, "line_items": [], "refunds": [], "meta_data": []}
+    assert derive(raw).gateway == expected
