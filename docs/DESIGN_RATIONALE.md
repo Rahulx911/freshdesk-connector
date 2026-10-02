@@ -27,6 +27,14 @@ have write permissions` for any write, whatever this repository does.
 `scripts/assert_read_only.py` proves it by signing a write by hand, bypassing
 the connector entirely.
 
+The first version of that script was wrong in an instructive way: it asserted
+only that the write was refused. An invalid key is refused for everything, so
+it passed for a stale credential and announced a guarantee that did not hold.
+A negative test that cannot fail for the right reason is worse than no test,
+because it manufactures confidence. It now requires a successful read first,
+and distinguishes "refused for lack of write permission" from "refused
+because the credential is invalid", which are both `401`.
+
 **Alternative rejected:** a Read-Write key with write tools behind approval.
 That is the right end state, but it changes the security conversation with the
 merchant and belongs in a second phase, not a take-home.

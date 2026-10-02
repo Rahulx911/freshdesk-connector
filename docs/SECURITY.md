@@ -22,6 +22,15 @@ POST /wp-json/wc/v3/orders
 This is the store refusing, independently of this code. A write bug here is
 not exploitable.
 
+`scripts/assert_read_only.py` proves both halves, and the second is worthless
+without the first. A key that does not exist is refused for *every* request,
+writes included, so a check that only asserts "the write failed" passes for a
+typo, a revoked key, or no key at all, and reports a security property the
+credential does not have. The script therefore requires a successful read
+first, then a refused write, then checks the refusal actually names the
+missing write permission rather than an invalid credential. Those two
+failures are indistinguishable at the HTTP layer: both are `401`.
+
 ### The secret never travels in clear
 `normalize_store_url` refuses plain HTTP for any non-local host, so the secret
 cannot be sent unencrypted to a real store. Local development hosts
