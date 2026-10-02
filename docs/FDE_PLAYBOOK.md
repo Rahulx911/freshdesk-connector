@@ -8,7 +8,7 @@ Questions I would ask:
 
 - **What share of your support load is "where is my order / refund / payment?"** *Usually the biggest bucket for a D2C merchant, and the one an agent can answer end to end.*
 - **When a customer asks where their refund is, where does your team look?** *If the answer is "the Razorpay dashboard, then the WooCommerce order", that is the problem this connector exists for. A refund row in WooCommerce is not evidence the money moved.*
-- **Has a customer ever been told a refund was processed when it had not been?** *Almost every merchant has a story. It is the fastest way to make `signals.reconciliation` concrete rather than abstract.*
+- **Has a customer ever been told a refund was processed when it had not been?** *Almost every merchant has a story. WooCommerce itself warns about this on the order: "Order status set to refunded. To return funds to the customer you will need to issue a refund through your payment gateway." The order still reads `refunded` with a net payment of zero, so the warning is easy to miss. That note is the fastest way to make `signals.reconciliation` concrete rather than abstract.*
 - **Who uses the agent: customers on the site or WhatsApp, or the shop team as a copilot?** *This decides the PII masking setting and how much order detail is safe to surface.*
 - **What is the hosting, and what else hits the REST API?** *Shared hosting with a plugin-heavy store is where an impatient agent causes an outage. It sets the request budget.*
 - **What must never happen?** *Usually: promising a refund, quoting the wrong customer's order, or exposing another buyer's address.*

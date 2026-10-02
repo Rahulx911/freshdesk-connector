@@ -15,6 +15,22 @@ A generic WooCommerce reader hands an agent an order marked `refunded` and leave
 | **One-call triage** | `store_pulse`: the recent order mix by payment state, intent and gateway, plus a ranked `needs_attention` list **with reasons** | The question a shop manager asks every morning, answered in one call |
 | **Citations** | `source_url` deep link on every record, HPOS-aware | Answers can be checked in wp-admin with one click |
 
+### WooCommerce agrees with us
+
+This is not a theory about how merchants get refunds wrong. When a shop manager marks an order refunded, WooCommerce writes this note on the order itself:
+
+> Order status set to refunded. To return funds to the customer you will need to issue a refund through your payment gateway.
+
+The order then reads `status: refunded`, `Refunded: -₹2,450.00`, `Net Payment: ₹0.00`. A connector that reports the status alone tells the agent the customer has their money. WooCommerce is saying the opposite in a note nobody reads, and `signals.reconciliation` is what surfaces it:
+
+```json
+{"status": "refund_not_confirmed_at_gateway",
+ "woocommerce_refund_rows": 1, "gateway_refund_ids": 0,
+ "explanation": "WooCommerce records a refund but carries no Razorpay refund id. The money may not have left the gateway. Verify with the Razorpay Refunds API before telling the customer it is done."}
+```
+
+Captured from the live local store, order 18.
+
 Example `store_pulse` entry, from the live local store:
 
 ```json
