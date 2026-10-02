@@ -34,19 +34,28 @@ Basic auth silently fails without TLS. Only a real store did.
 **Why it is not closed:** a Razorpay account needs a merchant signup with
 Indian business details, which is not something a take-home should require.
 
-**How it would close:** the connector reads `RAZORPAY_BASE_URL`, which only
-exists so the mock can be substituted. With real test-mode credentials the
-verification is three environment variables and the existing demo, no code
-change:
+**How it closes.** `scripts/verify_razorpay_contract.py` checks every
+assumption the connector makes, against the live API, and needs no data in
+the account:
 
 ```bash
-export RAZORPAY_BASE_URL=https://api.razorpay.com
-export RAZORPAY_KEY_ID=rzp_test_...
+export RAZORPAY_KEY_ID=rzp_test_...     # dashboard: Settings > API Keys, Test Mode
 export RAZORPAY_KEY_SECRET=...
+python scripts/verify_razorpay_contract.py
 ```
 
-Test-mode keys are free and describe no real money, so this is a credential
-gap rather than a design one.
+It confirms that Basic auth is accepted, that collections use the
+`{entity, count, items}` envelope, that amounts are integer paise, that a
+non-existent id answers **400 rather than 404**, that errors are wrapped in
+`{"error": {code, description}}`, that settlements are reachable and shaped
+as expected, and that a wrong secret is actually refused. It declines to run
+against a live key, because a read-only script still describes real customer
+money.
+
+A mismatch there is a real finding, not a formality: that is exactly how the
+WooCommerce half learned that Basic auth silently fails without TLS. Test
+keys are free and describe no real money, so this is a credential gap rather
+than a design one.
 
 ## Can
 
