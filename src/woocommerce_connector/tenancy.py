@@ -212,5 +212,9 @@ class RegistryWatcher:
             if mtime != self._loaded_mtime:
                 self._registry = Registry.load(self.path)
                 self._loaded_mtime = mtime
-        assert self._registry is not None
+        if self._registry is None:
+            # Not an assert: asserts vanish under `python -O`, and this is the
+            # guard that stops a tenantless registry being used as if it were
+            # loaded.
+            raise ConfigError(f"Tenant registry at {self.path} could not be loaded")
         return self._registry
