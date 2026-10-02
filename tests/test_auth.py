@@ -74,3 +74,27 @@ def test_env_beats_disk(tmp_path, monkeypatch):
 def test_api_base_is_the_woocommerce_namespace():
     c = auth.Credentials("https://shop.example.com", "ck_x", "cs_y")
     assert c.api_base() == "https://shop.example.com/wp-json/wc/v3"
+
+
+def test_disk_load_is_not_influenced_by_an_exported_credential(tmp_path, monkeypatch):
+    """Regression: the suite must not depend on the developer's shell.
+
+    `load()` checks the environment before the 0600 store, by design, so a
+    developer who had exported real credentials to run the live demo saw this
+    test read those instead of the ones it had just written. The autouse
+    fixture in conftest clears them; this asserts the behaviour directly so
+    the reason is recorded next to the code it protects.
+    """
+    monkeypatch.setenv("WOO_CONNECTOR_HOME", str(tmp_path / "cfg"))
+    monkeypatch.delenv(auth.ENV_URL, raising=False)
+    monkeypatch.delenv(auth.ENV_KEY, raising=False)
+    monkeypatch.delenv(auth.ENV_SECRET, raising=False)
+
+    auth.save(auth.Credentials("https://disk.example.com", "ck_disk", "cs_disk"))
+    assert auth.load().consumer_secret == "cs_disk"
+
+    # and the documented precedence still holds when the environment is set
+    monkeypatch.setenv(auth.ENV_URL, "https://env.example.com")
+    monkeypatch.setenv(auth.ENV_KEY, "ck_env")
+    monkeypatch.setenv(auth.ENV_SECRET, "cs_env")
+    assert auth.load().consumer_secret == "cs_env"
