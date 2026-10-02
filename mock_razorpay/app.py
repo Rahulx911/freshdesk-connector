@@ -94,6 +94,44 @@ async def get_refund(refund_id: str):
     return JSONResponse(refund)
 
 
+@app.get("/v1/settlements")
+async def list_settlements():
+    items = sorted(data.SETTLEMENTS.values(), key=lambda s: s["created_at"], reverse=True)
+    return JSONResponse({"entity": "collection", "count": len(items), "items": items})
+
+
+@app.get("/v1/settlements/recon/combined")
+async def settlement_recon(settlement_id: str | None = None):
+    """Razorpay's combined reconciliation report, trimmed to what matters.
+
+    One row per payment, naming the settlement it landed in.
+    """
+    rows = []
+    for setl_id, payment_ids in data.SETTLEMENT_PAYMENTS.items():
+        if settlement_id and setl_id != settlement_id:
+            continue
+        for pid in payment_ids:
+            payment = data.PAYMENTS.get(pid)
+            if not payment:
+                continue
+            rows.append({
+                "entity_id": pid, "type": "payment", "amount": payment["amount"],
+                "currency": payment["currency"], "settlement_id": setl_id,
+                "settled_at": data.SETTLEMENTS[setl_id]["created_at"],
+                "settlement_utr": data.SETTLEMENTS[setl_id].get("utr"),
+                "method": payment.get("method"),
+            })
+    return JSONResponse({"entity": "collection", "count": len(rows), "items": rows})
+
+
+@app.get("/v1/settlements/{settlement_id}")
+async def get_settlement(settlement_id: str):
+    settlement = data.SETTLEMENTS.get(settlement_id)
+    if not settlement:
+        return err("BAD_REQUEST_ERROR", f"The id provided does not exist: {settlement_id}", 400)
+    return JSONResponse(settlement)
+
+
 @app.get("/v1/{rest:path}")
 async def unknown(rest: str):
     return err("BAD_REQUEST_ERROR", f"The requested URL was not found: /v1/{rest}", 404)

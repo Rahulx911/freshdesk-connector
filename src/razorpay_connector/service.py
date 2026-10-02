@@ -15,9 +15,15 @@ from .reconcile import (
     normalize_refund,
     reconcile,
 )
+from .settlements import (
+    explain_settlement,
+    normalize_settlement,
+    reconcile_orders_to_settlement,
+)
 
 _PAY_ID = re.compile(r"^pay_[A-Za-z0-9]{10,24}$")
 _RFND_ID = re.compile(r"^rfnd_[A-Za-z0-9]{10,24}$")
+_SETL_ID = re.compile(r"^setl_[A-Za-z0-9]{10,24}$")
 
 
 def _check(value: str, pattern: re.Pattern, field: str, example: str) -> str:
@@ -97,6 +103,75 @@ class RazorpayService:
                 "so you have been charged once."
             )
         return out
+
+    # ---------------------------------------------------------- settlements
+    async def list_settlements(self, limit: int = 10) -> dict:
+        """Recent transfers to the merchant's bank, newest first."""
+        if limit < 1 or limit > 100:
+            raise InvalidRequest("limit must be between 1 and 100")
+        body = await self.client.get("/settlements")
+        items = [normalize_settlement(r).to_dict() for r in (body or {}).get("items", [])]
+        unsettled = [s for s in items if s.get("status") != "processed"]
+        out: dict[str, Any] = {"count": len(items), "items": items[:limit]}
+        if unsettled:
+            out["not_yet_at_the_bank"] = {
+                "count": len(unsettled),
+                "note": ("These have not reached the bank, so the statement will not show "
+                         "them. Usually the reason a merchant's totals look short."),
+            }
+        return out
+
+    async def get_settlement(self, settlement_id: str) -> dict:
+        """One settlement, with the arithmetic spelled out."""
+        sid = _check(settlement_id, _SETL_ID, "settlement_id", "setl_NmA1bCdEfGhIjK")
+        settlement = normalize_settlement(await self.client.get(f"/settlements/{sid}"))
+        out = settlement.to_dict()
+        out["explanation"] = explain_settlement(settlement)
+        return out
+
+    async def reconcile_settlement(
+        self, settlement_id: str, shop_order_totals: dict[str, float] | None = None
+    ) -> dict:
+        """Which payments are in this transfer, and does it tie out?
+
+        Pass `shop_order_totals` mapping Razorpay payment ids to what the shop
+        believes each order was worth, taken from the WooCommerce connector,
+        and any disagreement is named rather than smoothed over.
+        """
+        sid = _check(settlement_id, _SETL_ID, "settlement_id", "setl_NmA1bCdEfGhIjK")
+        settlement = normalize_settlement(await self.client.get(f"/settlements/{sid}"))
+        body = await self.client.get("/settlements/recon/combined", {"settlement_id": sid})
+        rows = (body or {}).get("items", [])
+        result = reconcile_orders_to_settlement(settlement, rows, shop_order_totals)
+        result["settlement"] = settlement.to_dict()
+        result["explanation"] = explain_settlement(settlement)
+        return result
+
+    async def find_settlement_for_payment(self, payment_id: str) -> dict:
+        """Which transfer did this payment land in, if any?
+
+        The question a merchant asks when a customer disputes a charge and
+        finance needs to know whether that money has already been paid out.
+        """
+        pid = _check(payment_id, _PAY_ID, "payment_id", "pay_NqX8aK2bLmTfQw")
+        body = await self.client.get("/settlements/recon/combined")
+        for row in (body or {}).get("items", []):
+            if row.get("entity_id") == pid:
+                sid = row.get("settlement_id")
+                settlement = normalize_settlement(await self.client.get(f"/settlements/{sid}"))
+                return {
+                    "payment_id": pid,
+                    "settled": settlement.status == "processed",
+                    "settlement": settlement.to_dict(),
+                    "explanation": explain_settlement(settlement),
+                }
+        return {
+            "payment_id": pid,
+            "settled": False,
+            "settlement": None,
+            "note": ("This payment is not in any settlement yet. Either it is within the "
+                     "settlement cycle, or it was refunded before payout."),
+        }
 
     async def connector_status(self) -> dict:
         creds = self.client.creds

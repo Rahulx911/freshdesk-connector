@@ -110,7 +110,8 @@ async def run(woo_url: str, rzp_url: str) -> None:
         print(f"{BOLD}Two connectors attached, as an Agent Studio agent would have them{RESET}")
         print(f"  {wi.serverInfo.name}: {len(wt.tools)} tools")
         print(f"  {ri.serverInfo.name}: {len(rt.tools)} tools")
-        check("both connectors expose read-only tools", len(wt.tools) == 11 and len(rt.tools) == 6)
+        check("both connectors expose read-only tools",
+              len(wt.tools) == 11 and len(rt.tools) == 10)
 
         mode = await call(rzp, "razorpay_status", {})
         check("gateway key mode is reported", mode.get("razorpay", {}).get("mode") == "test")
@@ -196,7 +197,39 @@ async def run(woo_url: str, rzp_url: str) -> None:
 
         # ------------------------------------------------------------------
         print(f"\n{BOLD}{'=' * 66}{RESET}")
-        print(f"{BOLD}Q4. The merchant's exposure, in money{RESET}")
+        print(f"{BOLD}Q4. \"Razorpay says it sent us X, the bank shows Y\"{RESET}")
+        print(f"{BOLD}{'=' * 66}{RESET}")
+
+        setls = await call(rzp, "list_settlements", {})
+        print(f"\n  settlements          : {setls['count']}")
+        if setls.get("not_yet_at_the_bank"):
+            print(f"  {YELLOW}not yet at the bank  : "
+                  f"{setls['not_yet_at_the_bank']['count']}{RESET}")
+        check("settlements not yet at the bank are flagged",
+              bool(setls.get("not_yet_at_the_bank")))
+
+        recon = await call(rzp, "reconcile_settlement",
+                           {"settlement_id": "setl_NmA1bCdEfGhIjK"})
+        print(f"\n  payments in transfer : {recon['payments_in_settlement']}")
+        print(f"  gross captured       : INR {recon['gross_captured']}")
+        print(f"  deducted             : INR {recon['deducted']}")
+        print(f"  net credited         : INR {recon['net_credited']}")
+        print(f"  {DIM}{recon['explanation']['arithmetic']}{RESET}")
+        print(f"  {DIM}{recon['explanation']['how_to_find_it_on_the_statement']}{RESET}")
+        check("the settlement ties out to its payments",
+              recon["gross_captured"] > recon["net_credited"])
+        check("the deduction is explained, not just stated",
+              "fees" in recon["explanation"]["arithmetic"])
+
+        disputed = await call(rzp, "find_settlement_for_payment",
+                              {"payment_id": "pay_NrT4bM9cPqWxYz"})
+        print(f"\n  the disputed refund's payment has been paid out: {disputed['settled']}")
+        check("a disputed payment can be traced to a payout",
+              disputed["settled"] is True)
+
+        # ------------------------------------------------------------------
+        print(f"\n{BOLD}{'=' * 66}{RESET}")
+        print(f"{BOLD}Q5. The merchant's exposure, in money{RESET}")
         print(f"{BOLD}{'=' * 66}{RESET}")
         pulse = await call(woo, "store_pulse", {"days": 30})
         risk = pulse["money_at_risk"]
@@ -213,6 +246,13 @@ async def run(woo_url: str, rzp_url: str) -> None:
               f"{pulse['coverage']['orders_matching_window']} orders in the window{RESET}")
         check("exposure is reported as money, not categories", exposed > 0)
         check("a complete scan reports a total, not a lower bound", "total_exposed" in risk)
+
+        cod = pulse.get("cash_on_delivery")
+        if cod:
+            print(f"  uncollected cash    : INR {cod['uncollected_value']}")
+            print(f"  worth converting    : {len(cod['worth_converting_to_prepaid'])} order(s)")
+            check("uncollected cash is reported separately from money at risk",
+                  "total_exposed" in risk and cod["uncollected_value"] > 0)
 
 
 def main() -> int:

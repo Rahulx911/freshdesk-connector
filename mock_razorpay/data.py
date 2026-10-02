@@ -118,3 +118,44 @@ REFUNDS_BY_PAYMENT: dict[str, list[str]] = {
     "pay_NuV2hI3jKlMnOp": ["rfnd_NuV2zY9xWvUtSr"],
     "pay_NzA9pQ1rStUvWx": ["rfnd_NzA9failedRfnd"],
 }
+
+
+# --------------------------------------------------------------- settlements
+# A settlement is the transfer Razorpay actually makes to the merchant's bank:
+# gross captured, minus fees, tax and refunds, for a batch of payments. The
+# finance team's recurring question is "Razorpay says it sent X, the bank shows
+# Y, which orders are in it", and that is what these support.
+#
+# Amounts are in paise, like everything else here, and each settlement's net
+# equals the gross of its payments minus fees and tax. That consistency is
+# load-bearing: tests assert the reconciliation ties out, so a fixture that
+# did not balance would make a real bug look like a fixture problem.
+SETTLEMENTS: dict[str, dict] = {
+    "setl_NmA1bCdEfGhIjK": {
+        "id": "setl_NmA1bCdEfGhIjK", "entity": "settlement", "amount": 544296,
+        "status": "processed", "fees": 8732, "tax": 1572, "utr": "KKBKH25092100451",
+        "created_at": ago(3),
+    },
+    "setl_NmB2cDeFgHiJkL": {
+        "id": "setl_NmB2cDeFgHiJkL", "entity": "settlement", "amount": 317494,
+        "status": "processed", "fees": 2124, "tax": 382, "utr": "KKBKH25091800233",
+        "created_at": ago(10),
+    },
+    # Still in flight. The bank will not show this yet, which is the single
+    # most common "the numbers do not match" explanation.
+    "setl_NmC3dEfGhIjKlM": {
+        "id": "setl_NmC3dEfGhIjKlM", "entity": "settlement", "amount": 150577,
+        "status": "created", "fees": 1121, "tax": 202, "utr": None,
+        "created_at": ago(0.2),
+    },
+}
+
+# Which payments went into which settlement. Real Razorpay exposes this through
+# the combined reconciliation report; the shape here is the part a connector
+# needs.
+SETTLEMENT_PAYMENTS: dict[str, list[str]] = {
+    "setl_NmA1bCdEfGhIjK": ["pay_NqX8aK2bLmTfQw", "pay_NrT4bM9cPqWxYz",
+                            "pay_NsK1cD4eFgHiJk", "pay_NsK1dE5fGhIjKl"],
+    "setl_NmB2cDeFgHiJkL": ["pay_NuV2hI3jKlMnOp"],
+    "setl_NmC3dEfGhIjKlM": ["pay_NwX5kL6mNoPqRs", "pay_NyZ7mN8oPqRsTu"],
+}
