@@ -16,7 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from .auth import Credentials, load
-from .client import WooClient, requests_spent, upstream_calls
+from .client import WooClient, cache_hits, requests_spent, upstream_calls
 from .errors import WooError
 from .observability import UPSTREAM_REQUESTS, audit, configure_logging
 from .service import WooService
@@ -77,6 +77,7 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
         """Run a tool, emit one audit line, and always return JSON."""
         requests_spent.set(0)
         upstream_calls.set(0)
+        cache_hits.set(0)
         try:
             with audit(tool, args):
                 service = await provider.get()
@@ -91,7 +92,10 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
             })
         UPSTREAM_REQUESTS.labels(tool=tool).inc(upstream_calls.get())
         if isinstance(result, dict):
-            result.setdefault("_meta", {})["upstream_requests"] = upstream_calls.get()
+            meta = result.setdefault("_meta", {})
+            meta["upstream_requests"] = upstream_calls.get()
+            if cache_hits.get():
+                meta["served_from_cache"] = cache_hits.get()
         return json.dumps(result, default=str)
 
     ro = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)

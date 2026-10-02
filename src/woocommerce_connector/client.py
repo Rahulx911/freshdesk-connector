@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 
 from .auth import Credentials
+from .cache import ResponseCache, cache_key
 from .errors import (
     AuthError,
     InvalidRequest,
@@ -48,6 +49,7 @@ log = logging.getLogger("woocommerce_connector")
 USER_AGENT = "agent-studio-woocommerce-connector/0.1"
 
 requests_spent: contextvars.ContextVar[int] = contextvars.ContextVar("requests_spent", default=0)
+cache_hits: contextvars.ContextVar[int] = contextvars.ContextVar("cache_hits", default=0)
 upstream_calls: contextvars.ContextVar[int] = contextvars.ContextVar("upstream_calls", default=0)
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
@@ -68,6 +70,7 @@ class WooClient:
         creds: Credentials,
         *,
         rate_limiter: Any = None,
+        cache: ResponseCache | None = None,
         max_wait_s: float = 20.0,
         max_retries: int = 3,
         timeout_s: float = 20.0,
@@ -76,6 +79,10 @@ class WooClient:
     ):
         self.creds = creds
         self.rl = rate_limiter or RateLimiter()
+        self.cache = cache if cache is not None else ResponseCache()
+        # Scoped to the credential so two merchants in one process can never
+        # read each other's rows out of a shared cache.
+        self._cache_scope = f"{creds.store_url}|{creds.consumer_key}"
         self.max_wait_s = max_wait_s
         self.max_retries = max_retries
         self._sleep = sleep
@@ -177,10 +184,20 @@ class WooClient:
             raise UpstreamError("Store kept failing; gave up within the time budget")
         await self._sleep(delay)
 
-    async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return (await self.get(path, params)).json()
+    async def get_json(self, path: str, params: dict[str, Any] | None = None,
+                       *, fresh: bool = False) -> Any:
+        key = cache_key(self._cache_scope, path, params or {})
+        if not fresh:
+            hit, cached = self.cache.get(key)
+            if hit:
+                cache_hits.set(cache_hits.get() + 1)
+                return cached
+        body = (await self.get(path, params)).json()
+        self.cache.put(key, body)
+        return body
 
-    async def get_page(self, path: str, params: dict[str, Any] | None = None) -> tuple[Any, dict]:
+    async def get_page(self, path: str, params: dict[str, Any] | None = None,
+                       *, fresh: bool = False) -> tuple[Any, dict]:
         """Returns (json, page_info).
 
         WordPress sends `X-WP-Total` and `X-WP-TotalPages` on collection
@@ -188,16 +205,22 @@ class WooClient:
         because `X-WP-Total` is what lets an agent say "312 matching orders"
         without walking every page.
         """
+        key = cache_key(self._cache_scope, path, params or {})
+        if not fresh:
+            hit, cached = self.cache.get(key)
+            if hit:
+                cache_hits.set(cache_hits.get() + 1)
+                return cached
         resp = await self.get(path, params)
         h = resp.headers
-        total = _int(h.get("x-wp-total"))
-        total_pages = _int(h.get("x-wp-totalpages"))
         info = {
-            "total": total,
-            "total_pages": total_pages,
+            "total": _int(h.get("x-wp-total")),
+            "total_pages": _int(h.get("x-wp-totalpages")),
             "has_more": bool(_LINK_NEXT_RE.search(h.get("link", ""))),
         }
-        return resp.json(), info
+        result = (resp.json(), info)
+        self.cache.put(key, result)
+        return result
 
     async def ping(self) -> dict:
         """Cheapest call that proves the credential can read orders."""
