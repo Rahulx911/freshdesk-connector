@@ -80,6 +80,16 @@ gap rather than a design one.
 - Rank the backlog with `store_pulse`, every entry carrying the plain-language
   reasons behind its score.
 
+### Finance questions, with the paired Razorpay connector
+- Explain a settlement: gross captured, Razorpay's fees, tax on those fees,
+  the net credited, and the bank reference to find it on a statement.
+- List which payments are inside a settlement and whether it ties out,
+  cross-checked against the shop's own order totals when those are supplied.
+- Say whether a given payment has been paid out yet, which is what finance
+  needs when a charge is disputed.
+- Explain the commonest "our numbers do not match": a settlement that has
+  not reached the bank yet, so the statement correctly does not show it.
+
 ### With the paired Razorpay connector
 - Resolve a payment reference into what the gateway actually did.
 - Answer "did the refund reach the customer?" with one of five verdicts:
@@ -120,18 +130,27 @@ gap rather than a design one.
   and exclude guest orders placed before an account existed.
 - **Stock figures are a snapshot.** They can change between the call and the
   customer reading the reply.
+- **Responses may be up to 30 seconds stale.** A short cache keeps an agent
+  from re-reading the same order three times in one conversation. Anything
+  that must be current can bypass it.
+- **Triage pages through the window, but not infinitely.** Past the page
+  budget it reports lower bounds under different key names rather than
+  totals, so a partial scan cannot be quoted as a complete one.
 - **Refund reasons are free text** written by shop staff. A Razorpay refund id
   is only found there if someone pasted it.
 - **Deleted and draft orders are invisible.** `trash` and `checkout-draft` are
   deliberately excluded from the allowed statuses.
 
 ### Limits of the deployment
-- **One replica.** The rate budget is in-process. Several replicas sharing one
-  store would each think they had the full budget; that needs a shared
-  backend, which is sketched in ARCHITECTURE.md but not built.
-- **One store per process.** There is no tenant registry. Multi-merchant
-  hosting would need the token-to-tenant binding this connector does not yet
-  have.
+- **One replica.** The rate budget and the response cache are in-process.
+  Several replicas sharing one store would each think they had the full
+  budget. The interface is shaped so a shared backend is a constructor
+  change, but that backend is not built.
+- **Hosted multi-merchant mode is built but not wired to a transport.**
+  `tenancy.py` resolves a merchant from a hashed bearer token, server side,
+  and `TenantServiceProvider` gives each merchant its own client, budget and
+  cache. Over stdio there is no bearer token to read, so single-merchant mode
+  is what actually runs today.
 - **WooCommerce core only.** Subscriptions, Bookings, Memberships and most
   payment plugins expose their own REST namespaces that are not wired up. A
   Razorpay subscription is visible only through whatever it writes onto the
