@@ -36,8 +36,13 @@ first, then `auth login`; expect `auth_failed` in the gap.
 ```bash
 cd deploy/woo-local
 docker compose up -d && ./bootstrap.sh      # prints a Read-scoped key
-docker compose down -v                      # removes everything
+cd ../..                                     # scripts live at the repo root
+docker compose down -v                       # removes everything (from deploy/woo-local)
 ```
+
+`bootstrap.sh` is idempotent: run twice and it detects the existing data and
+stops rather than seeding a second set of orders. `FORCE_SEED=1` overrides
+that deliberately.
 
 Real WordPress and WooCommerce, seeded with fictional data. Nothing in it is
 meant to face the internet; the admin password is fixed deliberately because
