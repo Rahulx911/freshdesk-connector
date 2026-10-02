@@ -171,22 +171,40 @@ class WooService:
         return fit_response(out, list_key="orders")
 
     # ---------------------------------------------------------- store pulse
-    async def store_pulse(self, *, days: int = 14, scan: int = 100, top: int = 10) -> dict:
+    async def store_pulse(self, *, days: int = 14, scan: int = 100, top: int = 10,
+                          max_pages: int = 10) -> dict:
         """One call that answers 'what needs attention in the store today?'.
 
-        Scans recent orders, derives signals locally, and ranks the ones that
-        need a human, each with the reasons that produced the rank.
+        Pages through the window rather than sampling one page. This matters:
+        a merchant doing thousands of orders a month would otherwise get a
+        confident rupee figure computed from the newest hundred orders, and
+        that figure is what gets quoted in a meeting. When the window cannot
+        be covered within `max_pages`, the totals are reported as explicit
+        lower bounds under different key names, so a partial result cannot be
+        mistaken for a complete one.
         """
         if days < 1 or days > 90:
             raise InvalidRequest("days must be between 1 and 90")
-        scan = q.clean_per_page(scan)
+        per_page = q.clean_per_page(scan)
+        if max_pages < 1 or max_pages > 50:
+            raise InvalidRequest("max_pages must be between 1 and 50")
         now = datetime.now(timezone.utc)
         after = (now.timestamp() - days * 86400)
         after_iso = datetime.fromtimestamp(after, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
-        params = q.build_order_query(status=["any"], created_after=after_iso, per_page=scan)
-        data, info = await self.client.get_page("/orders", params)
-        raws = [o for o in (data or []) if isinstance(o, dict)]
+        raws: list[dict] = []
+        info: dict = {}
+        pages_fetched = 0
+        for page in range(1, max_pages + 1):
+            params = q.build_order_query(status=["any"], created_after=after_iso,
+                                         per_page=per_page, page=page)
+            data, info = await self.client.get_page("/orders", params)
+            batch = [o for o in (data or []) if isinstance(o, dict)]
+            raws.extend(batch)
+            pages_fetched = page
+            if not info.get("has_more") or not batch:
+                break
+        complete = not info.get("has_more", False)
 
         currency = "INR"
         by_state: dict[str, int] = {}
@@ -237,13 +255,28 @@ class WooService:
                 duplicate_exposure += (sig.amounts or {}).get("order_total") or 0
 
         ranked.sort(key=lambda e: (-e["score"], e["id"] or 0))
+        total_matching = info.get("total")
+        coverage = {
+            "orders_scanned": len(raws),
+            "orders_matching_window": total_matching,
+            "pages_fetched": pages_fetched,
+            "scan_complete": complete,
+        }
+        if not complete:
+            coverage["warning"] = (
+                f"Only the {len(raws)} most recent orders of "
+                f"{total_matching if total_matching is not None else 'an unknown number'} "
+                "in this window were scanned. Every figure below is a LOWER BOUND, not a "
+                "total. Raise max_pages, or narrow the window with days, before quoting "
+                "any number to the merchant."
+            )
         return fit_response({
             "window_days": days,
-            "orders_scanned": len(raws),
-            "orders_matching_window": info.get("total"),
-            "scan_complete": not info.get("has_more", False),
-            "gross_value": round(gross, 2),
-            "refunded_value": round(refunded, 2),
+            "coverage": coverage,
+            # Kept at the top level for readability, but named so a partial
+            # scan can never be read as a complete one.
+            ("gross_value" if complete else "gross_value_lower_bound"): round(gross, 2),
+            ("refunded_value" if complete else "refunded_value_lower_bound"): round(refunded, 2),
             "by_payment_state": dict(sorted(by_state.items(), key=lambda kv: -kv[1])),
             "by_intent": dict(sorted(by_intent.items(), key=lambda kv: -kv[1])),
             "by_gateway": dict(sorted(by_gateway.items(), key=lambda kv: -kv[1])),
@@ -251,7 +284,8 @@ class WooService:
             # The two numbers a merchant actually reacts to. Both are money
             # already exposed, measured from their own orders, before the
             # agent has answered a single question.
-            "money_at_risk": _money_at_risk(currency, at_risk, duplicate_exposure, unreconciled, by_intent),
+            "money_at_risk": _money_at_risk(currency, at_risk, duplicate_exposure,
+                                            unreconciled, by_intent, complete=complete),
             "needs_attention": ranked[: max(1, min(top, 50))],
         }, list_key="needs_attention")
 
@@ -277,7 +311,7 @@ class WooService:
 
 
 def _money_at_risk(currency: str, unconfirmed: float, duplicate: float,
-                   rows: list[dict], by_intent: dict[str, int]) -> dict:
+                   rows: list[dict], by_intent: dict[str, int], *, complete: bool = True) -> dict:
     """The headline a shop manager reacts to.
 
     Counting categories is an engineer's summary. A merchant wants the amount
@@ -301,7 +335,17 @@ def _money_at_risk(currency: str, unconfirmed: float, duplicate: float,
             "meaning": ("More than one Razorpay payment id against a single order. The "
                         "customer may have been charged twice."),
         }
-    out["total_exposed"] = round(unconfirmed + duplicate, 2)
+    total = round(unconfirmed + duplicate, 2)
+    if complete:
+        out["total_exposed"] = total
+    else:
+        # A different key, deliberately. "total_exposed" on a partial scan is
+        # the number that ends up on a slide and is wrong by an order of
+        # magnitude.
+        out["total_exposed_lower_bound"] = total
+        out["scan_complete"] = False
+        out["warning"] = ("Computed from a partial scan of the window. The real exposure is "
+                          "higher. Do not quote this as a total.")
     return out
 
 
