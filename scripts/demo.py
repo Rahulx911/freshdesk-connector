@@ -47,12 +47,14 @@ def free_port() -> int:
 
 
 @contextmanager
-def mock_store():
+def mock_store(rate_limit: int = 0):
+    """Run the mock WooCommerce on a free port. rate_limit=0 means unlimited."""
     port = free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "mock_server.app:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "error"],
         cwd=ROOT,
+        env={**os.environ, "MOCK_RATE_LIMIT": str(rate_limit)},
     )
     base = f"http://127.0.0.1:{port}"
     try:
