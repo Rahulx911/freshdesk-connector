@@ -119,7 +119,9 @@ async def run(store_url: str, key: str, secret: str, *, live: bool) -> None:
 
         print(f"\n{BOLD}== Payment signals (the differentiator){RESET}")
         pulse = await call(session, "store_pulse", {"days": 30})
-        check("store_pulse scanned orders", bool((pulse or {}).get("orders_scanned")))
+        coverage = (pulse or {}).get("coverage", {})
+        check("store_pulse scanned orders", bool(coverage.get("orders_scanned")))
+        check("scan coverage is reported", "scan_complete" in coverage)
         attention = (pulse or {}).get("needs_attention", [])
         check("needs_attention is ranked", bool(attention))
         check("every ranked order explains itself", all(e.get("why") for e in attention))

@@ -204,8 +204,15 @@ async def run(woo_url: str, rzp_url: str) -> None:
               f"INR {risk['unconfirmed_refunds']['amount']}")
         print(f"  possible double charges: {risk['possible_double_charges']['orders']} orders, "
               f"INR {risk['possible_double_charges']['order_value']}")
-        print(f"  {BOLD}total exposed       : INR {risk['total_exposed']}{RESET}")
-        check("exposure is reported as money, not categories", risk["total_exposed"] > 0)
+        # The key name changes on a partial scan, which is the point: a
+        # lower bound must not read as a total.
+        exposed = risk.get("total_exposed", risk.get("total_exposed_lower_bound"))
+        label = "total exposed" if "total_exposed" in risk else "exposed (LOWER BOUND)"
+        print(f"  {BOLD}{label:<20}: INR {exposed}{RESET}")
+        print(f"  {DIM}scan covered {pulse['coverage']['orders_scanned']} of "
+              f"{pulse['coverage']['orders_matching_window']} orders in the window{RESET}")
+        check("exposure is reported as money, not categories", exposed > 0)
+        check("a complete scan reports a total, not a lower bound", "total_exposed" in risk)
 
 
 def main() -> int:

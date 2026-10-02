@@ -73,7 +73,8 @@ async def test_invalid_argument_is_explained(server):
 
 async def test_store_pulse_ranks_with_reasons(server):
     payload = _payload(await server.call_tool("store_pulse", {"days": 30}))
-    assert payload["orders_scanned"] > 0
+    assert payload["coverage"]["orders_scanned"] > 0
+    assert payload["coverage"]["scan_complete"] is True
     assert payload["needs_attention"]
     top = payload["needs_attention"][0]
     assert top["why"] and top["score"] > 0
