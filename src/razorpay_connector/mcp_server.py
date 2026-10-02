@@ -44,6 +44,11 @@ INSTRUCTIONS = inspect.cleandoc("""
       date, and hand to a human.
     * Amounts here are in rupees. The underlying API uses paise; the
       conversion has already been done.
+
+    Settlement tools answer finance questions, not customer ones. A
+    settlement is net of fees, tax and refunds, so it never equals the sum of
+    order totals, and one that is not `processed` has not reached the bank
+    yet. Say that rather than reporting a shortfall.
 """)
 
 
@@ -148,6 +153,55 @@ def build_server(provider: ServiceProvider | None = None) -> FastMCP:
         """
         return await _call("verify_duplicate_charge", locals(),
                            lambda s: s.verify_duplicate_charge(payment_ids))
+
+    @tool(annotations=ro)
+    async def list_settlements(limit: int = 10) -> str:
+        """Recent transfers Razorpay made to the merchant's bank account.
+
+        Use this for finance questions, not customer questions. A settlement
+        is net of fees, tax and refunds, so it will never equal the sum of
+        order totals. Anything not in `processed` state has not reached the
+        bank yet, which is usually why a merchant's figures look short.
+        """
+        return await _call("list_settlements", locals(), lambda s: s.list_settlements(limit))
+
+    @tool(annotations=ro)
+    async def get_settlement(settlement_id: str) -> str:
+        """One settlement with the arithmetic spelled out.
+
+        Returns gross captured, Razorpay's fees, tax on those fees, and the
+        net amount credited, plus the bank reference to find it on a
+        statement. Quote the arithmetic rather than only the total; the
+        deduction is what merchants query.
+        """
+        return await _call("get_settlement", locals(), lambda s: s.get_settlement(settlement_id))
+
+    @tool(annotations=ro)
+    async def reconcile_settlement(settlement_id: str,
+                                   shop_order_totals: dict | None = None) -> str:
+        """Which payments are in this transfer, and does it tie out?
+
+        This answers the merchant's weekly question: Razorpay says it sent a
+        number, the bank shows another, which orders are in it. Optionally
+        pass `shop_order_totals`, a mapping of Razorpay payment id to the
+        order total WooCommerce holds, and any disagreement is reported
+        rather than averaged away. Partial captures and post-payment order
+        edits are the usual causes.
+        """
+        return await _call("reconcile_settlement", locals(),
+                           lambda s: s.reconcile_settlement(settlement_id, shop_order_totals))
+
+    @tool(annotations=ro)
+    async def find_settlement_for_payment(payment_id: str) -> str:
+        """Has this payment been paid out to the merchant yet?
+
+        Use it when a charge is disputed and finance needs to know whether
+        the money has already left Razorpay. A payment missing from every
+        settlement is either inside the current cycle or was refunded before
+        payout.
+        """
+        return await _call("find_settlement_for_payment", locals(),
+                           lambda s: s.find_settlement_for_payment(payment_id))
 
     @tool(annotations=ro)
     async def razorpay_status() -> str:

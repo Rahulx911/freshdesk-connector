@@ -130,6 +130,105 @@
       }
     },
     {
+      "name": "list_settlements",
+      "description": "Recent transfers Razorpay made to the merchant's bank account.\n\nUse this for finance questions, not customer questions. A settlement\nis net of fees, tax and refunds, so it will never equal the sum of\norder totals. Anything not in `processed` state has not reached the\nbank yet, which is usually why a merchant's figures look short.",
+      "input_schema": {
+        "properties": {
+          "limit": {
+            "default": 10,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "list_settlementsArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "get_settlement",
+      "description": "One settlement with the arithmetic spelled out.\n\nReturns gross captured, Razorpay's fees, tax on those fees, and the\nnet amount credited, plus the bank reference to find it on a\nstatement. Quote the arithmetic rather than only the total; the\ndeduction is what merchants query.",
+      "input_schema": {
+        "properties": {
+          "settlement_id": {
+            "title": "Settlement Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "settlement_id"
+        ],
+        "title": "get_settlementArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "reconcile_settlement",
+      "description": "Which payments are in this transfer, and does it tie out?\n\nThis answers the merchant's weekly question: Razorpay says it sent a\nnumber, the bank shows another, which orders are in it. Optionally\npass `shop_order_totals`, a mapping of Razorpay payment id to the\norder total WooCommerce holds, and any disagreement is reported\nrather than averaged away. Partial captures and post-payment order\nedits are the usual causes.",
+      "input_schema": {
+        "properties": {
+          "settlement_id": {
+            "title": "Settlement Id",
+            "type": "string"
+          },
+          "shop_order_totals": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Shop Order Totals"
+          }
+        },
+        "required": [
+          "settlement_id"
+        ],
+        "title": "reconcile_settlementArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "find_settlement_for_payment",
+      "description": "Has this payment been paid out to the merchant yet?\n\nUse it when a charge is disputed and finance needs to know whether\nthe money has already left Razorpay. A payment missing from every\nsettlement is either inside the current cycle or was refunded before\npayout.",
+      "input_schema": {
+        "properties": {
+          "payment_id": {
+            "title": "Payment Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "payment_id"
+        ],
+        "title": "find_settlement_for_paymentArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
       "name": "razorpay_status",
       "description": "Check the Razorpay connection and whether the key is test or live.\n\nRead the mode before quoting any figure to a customer. Test-mode data\ndescribes money that does not exist.",
       "input_schema": {

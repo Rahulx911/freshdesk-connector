@@ -206,7 +206,7 @@ async def test_live_key_carries_a_warning():
 
 
 # -------------------------------------------------------------- mcp layer
-async def test_mcp_exposes_six_read_only_tools():
+async def test_mcp_exposes_ten_read_only_tools():
     from razorpay_connector.mcp_server import ServiceProvider, build_server
 
     class Stub(ServiceProvider):
@@ -218,9 +218,120 @@ async def test_mcp_exposes_six_read_only_tools():
     server = build_server(Stub())
     tools = await server.list_tools()
     assert {t.name for t in tools} == {
+        # support: did the money move?
         "get_payment", "list_payment_refunds", "get_refund",
-        "verify_refund", "verify_duplicate_charge", "razorpay_status",
+        "verify_refund", "verify_duplicate_charge",
+        # finance: did the money arrive?
+        "list_settlements", "get_settlement", "reconcile_settlement",
+        "find_settlement_for_payment",
+        "razorpay_status",
     }
     for t in tools:
         assert t.annotations.readOnlyHint is True
         assert t.description and len(t.description) > 60
+
+
+# ------------------------------------------------------------- settlements
+async def test_settlement_arithmetic_is_spelled_out(service):
+    out = await service.get_settlement("setl_NmA1bCdEfGhIjK")
+    assert out["net_amount_credited"] == 5442.96
+    assert out["razorpay_fees"] == 87.32
+    assert out["tax_on_fees"] == 15.72
+    # gross is derived from net plus deductions, not taken on trust
+    assert out["gross_before_deductions"] == 5546.0
+    assert "= 5442.96 credited" in out["explanation"]["arithmetic"]
+
+
+async def test_unprocessed_settlement_explains_the_missing_bank_line(service):
+    """The most common 'our numbers do not match' explanation."""
+    out = await service.get_settlement("setl_NmC3dEfGhIjKlM")
+    assert out["status"] == "created"
+    assert out["bank_reference"] is None
+    assert "not been sent to the bank" in out["explanation"]["why_the_bank_may_not_show_it"]
+
+
+async def test_processed_settlement_gives_the_bank_reference(service):
+    out = await service.get_settlement("setl_NmA1bCdEfGhIjK")
+    assert out["bank_reference"] == "KKBKH25092100451"
+    assert "KKBKH25092100451" in out["explanation"]["how_to_find_it_on_the_statement"]
+
+
+async def test_reconcile_settlement_lists_its_payments(service):
+    out = await service.reconcile_settlement("setl_NmA1bCdEfGhIjK")
+    assert out["payments_in_settlement"] == 4
+    # 1298.00 + 2450.00 + 899.00 + 899.00
+    assert out["gross_captured"] == 5546.0
+    assert out["net_credited"] == 5442.96
+    assert out["deducted"] == 103.04
+    # the settlement agrees with its own payments, so nothing is unexplained
+    assert "unexplained_difference" not in out
+
+
+async def test_reconcile_names_disagreements_with_the_shop(service):
+    """A payment that does not match the shop's order total is reported,
+    not averaged away. Partial captures cause this routinely."""
+    out = await service.reconcile_settlement(
+        "setl_NmB2cDeFgHiJkL", shop_order_totals={"pay_NuV2hI3jKlMnOp": 3500.0})
+    assert out["amount_mismatches"]
+    row = out["amount_mismatches"][0]
+    assert row["shop_order_total"] == 3500.0
+    assert row["amount"] == 3200.0
+    assert row["mismatch"] == 300.0
+    assert "partial captures" in out["warning"].lower()
+
+
+async def test_matching_totals_produce_no_warning(service):
+    out = await service.reconcile_settlement(
+        "setl_NmB2cDeFgHiJkL", shop_order_totals={"pay_NuV2hI3jKlMnOp": 3200.0})
+    assert "amount_mismatches" not in out
+    assert "warning" not in out
+
+
+async def test_find_settlement_for_a_paid_out_payment(service):
+    out = await service.find_settlement_for_payment("pay_NqX8aK2bLmTfQw")
+    assert out["settled"] is True
+    assert out["settlement"]["id"] == "setl_NmA1bCdEfGhIjK"
+
+
+async def test_payment_in_an_unprocessed_settlement_is_not_settled(service):
+    out = await service.find_settlement_for_payment("pay_NwX5kL6mNoPqRs")
+    assert out["settled"] is False
+    assert out["settlement"]["status"] == "created"
+
+
+async def test_payment_in_no_settlement_says_so_without_guessing(service):
+    out = await service.find_settlement_for_payment("pay_NzA9pQ1rStUvWx")
+    assert out["settled"] is False
+    assert out["settlement"] is None
+    assert "settlement cycle" in out["note"]
+
+
+async def test_settlements_flag_what_has_not_reached_the_bank(service):
+    out = await service.list_settlements()
+    assert out["not_yet_at_the_bank"]["count"] == 1
+    assert "statement will not show" in out["not_yet_at_the_bank"]["note"]
+
+
+async def test_unexplained_difference_is_surfaced_not_hidden(service, monkeypatch):
+    """If the gateway's own numbers do not tie out, say so.
+
+    Refunds netted into the same cycle are the usual cause, and reporting a
+    shortfall without checking those is how a merchant gets told the wrong
+    thing about their money.
+    """
+    from razorpay_connector.settlements import (
+        normalize_settlement,
+        reconcile_orders_to_settlement,
+    )
+    settlement = normalize_settlement(
+        {"id": "setl_x", "status": "processed", "amount": 100000, "fees": 1000, "tax": 180})
+    rows = [{"entity_id": "pay_a", "amount": 150000}]   # more captured than accounted for
+    out = reconcile_orders_to_settlement(settlement, rows)
+    assert out["unexplained_difference"] == 488.2
+    assert "refunds netted off" in out["unexplained_note"].lower()
+
+
+async def test_malformed_settlement_id_rejected(service):
+    for bad in ["", "setl_", "pay_NqX8aK2bLmTfQw", "nonsense"]:
+        with pytest.raises(InvalidRequest):
+            await service.get_settlement(bad)
