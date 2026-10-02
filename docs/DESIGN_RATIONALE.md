@@ -124,6 +124,20 @@ The safety cases assert on what must **not** appear in an answer. The
 expensive failure is not a wrong order number; it is the phrase "your refund
 has been sent" attached to money that never moved.
 
+## What I know is unverified, and why that matters to me
+
+The WooCommerce half is verified against a real store, including two findings
+I would have got wrong from documentation alone: Basic auth silently failing
+without TLS, and WooCommerce's own order note admitting a refund row does not
+move money.
+
+The Razorpay half is not. It was built against a mock reproducing the
+published contract, which is exactly the position I was in with WooCommerce
+before a real store corrected me. I am not going to claim the two are
+equivalent. `docs/CAPABILITIES.md` has the component-by-component status, and
+the base URL is configurable precisely so that gap closes with credentials
+rather than a rewrite.
+
 ## What I would change with more time
 
 1. A shared rate budget, the moment there is more than one replica.

@@ -3,6 +3,51 @@
 The deliverable the assignment asks for: an honest account of the connector's
 reach, written for whoever has to decide whether to trust it with a merchant.
 
+## What has and has not been verified
+
+Stated plainly, because "it works" means different things for different parts
+of this system.
+
+| Component | Verified against | Status |
+|---|---|---|
+| WooCommerce connector | Real WordPress 7.1 + WooCommerce 11.1, in Docker and in CI | **Verified live** |
+| WooCommerce auth, both flows | Real store: Basic over HTTPS, OAuth 1.0a over plain HTTP | **Verified live** |
+| Read-only guarantee | Real store refused a hand-signed write: `401 The API key provided does not have write permissions` | **Verified live** |
+| Admin deep links | Opened in a real wp-admin; resolved to the right order | **Verified live** |
+| Rate-limit handling | Simulated 429 and 503 with `Retry-After`, not a real throttling host | Simulated |
+| Razorpay connector | A mock gateway in this repository, **not a real Razorpay account** | **Not verified live** |
+| Agent behaviour | 19 scenarios in oracle mode, deterministic scoring, no model in the loop | No model run |
+
+### The Razorpay gap, specifically
+
+The gateway half has never talked to Razorpay. Everything it does was built
+against `mock_razorpay/`, which reproduces the real API's shapes from the
+published documentation: HTTP Basic with the key id and secret, amounts in
+paise, the `{"error": {...}}` envelope, the `{"entity": "collection", ...}`
+wrapper on refund lists, and `400` rather than `404` for an id that does not
+exist. Those are the details a connector gets wrong, and they are pinned in
+`tests/test_razorpay.py`. But reproducing a documented contract is not the
+same as meeting the real one, and the WooCommerce half taught me that
+difference the hard way: the published documentation did not tell me that
+Basic auth silently fails without TLS. Only a real store did.
+
+**Why it is not closed:** a Razorpay account needs a merchant signup with
+Indian business details, which is not something a take-home should require.
+
+**How it would close:** the connector reads `RAZORPAY_BASE_URL`, which only
+exists so the mock can be substituted. With real test-mode credentials the
+verification is three environment variables and the existing demo, no code
+change:
+
+```bash
+export RAZORPAY_BASE_URL=https://api.razorpay.com
+export RAZORPAY_KEY_ID=rzp_test_...
+export RAZORPAY_KEY_SECRET=...
+```
+
+Test-mode keys are free and describe no real money, so this is a credential
+gap rather than a design one.
+
 ## Can
 
 ### Orders

@@ -78,6 +78,7 @@ python scripts/assert_read_only.py          # proves the key cannot write
 
 ## Status / next steps
 
-- Done: all Option 3 requirements; **both** auth flows; verified end to end against a real WordPress 7.1 + WooCommerce 11.1 store.
+- Done: all Option 3 requirements; **both** auth flows; verified end to end against a real WordPress 7.1 + WooCommerce 11.1 store; paired Razorpay connector closing the reconciliation loop.
+- **The Razorpay half has never run against a real Razorpay account** (mock only). `RAZORPAY_BASE_URL` exists so test-mode credentials close that with no code change. See the verification table in `docs/CAPABILITIES.md`.
 - **Mock data is the eval ground truth.** `evals/cases.json` asserts facts from `mock_server/data.py`; rerun `python -m evals.run --oracle` after changing either.
 - Not built: shared rate budget across replicas, multi-tenant registry, webhooks, and the Razorpay Payments/Refunds tool that would turn `reconciliation` from advisory into actionable.
