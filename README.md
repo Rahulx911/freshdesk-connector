@@ -147,5 +147,5 @@ Read [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) for the full list. The short
 - **Read-only.** No refunds, no status changes, no cancellations. Those need a human.
 - **Single replica.** The rate budget is in-process. Several replicas against one store need a shared backend.
 - **WooCommerce core only.** Subscriptions and Bookings expose their own endpoints that are not wired up.
-- **The Razorpay connector runs against a mock gateway**, not a real Razorpay account, because that needs a merchant signup. The WooCommerce half runs against a real store.
+- **The Razorpay connector has never talked to Razorpay.** It was built against a mock that reproduces the documented API, and the WooCommerce half taught me that a documented contract and a real one are not the same thing. A merchant signup is not something a take-home should need. See [what has and has not been verified](docs/CAPABILITIES.md#what-has-and-has-not-been-verified); closing it is three environment variables, no code change.
 - **No write path anywhere.** Re-issuing a failed refund is named as an action for a human, never performed.
