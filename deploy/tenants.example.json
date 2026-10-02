@@ -1,0 +1,26 @@
+{
+  "_comment": "Hosted multi-merchant registry. Only token hashes live here: mint with `woocommerce-connector token create --name <agent> --tenant <merchant>`, which prints the token once and the line to paste. Secrets are referenced by environment variable or file; an inline value is rejected, not warned about.",
+  "tenants": {
+    "kettle-and-leaf": {
+      "store_url": "https://kettleandleaf.example.com",
+      "consumer_key_env": "WOO_CK_KETTLE",
+      "consumer_secret_env": "WOO_CS_KETTLE",
+      "razorpay_key_id_env": "RZP_ID_KETTLE",
+      "razorpay_key_secret_env": "RZP_SECRET_KETTLE",
+      "redact_pii": true
+    },
+    "spice-route": {
+      "store_url": "https://spiceroute.example.com",
+      "consumer_key_file": "/run/secrets/woo_ck_spice",
+      "consumer_secret_file": "/run/secrets/woo_cs_spice",
+      "redact_pii": true
+    }
+  },
+  "tokens": [
+    {
+      "name": "kettle-support-agent",
+      "tenant": "kettle-and-leaf",
+      "sha256": "replace-with-the-64-hex-digest-that-token-create-prints"
+    }
+  ]
+}

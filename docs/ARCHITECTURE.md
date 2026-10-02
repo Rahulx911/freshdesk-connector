@@ -52,9 +52,11 @@ string and the pairs joined with `%26`, and the signing key is
 
 ## Known gaps and the shape of the fix
 
-| Gap | Fix |
+| Gap | Status |
 |---|---|
-| Rate budget is in-process, so replicas each think they have the whole budget | Move `RateLimiter` behind the same async interface backed by Redis, with check-and-reserve as one atomic script using server time |
-| One store per process | A tenant registry keyed by hashed bearer token, resolving the tenant server-side so it can never come from a tool argument |
-| Pull only | WooCommerce webhooks into an Agent Studio trigger, with HMAC verification |
-| References found but not resolved | A Razorpay Payments/Refunds tool, so `reconciliation` reports what the gateway says rather than where to look |
+| References found but not resolved | **Closed.** The paired Razorpay connector resolves them, including settlements |
+| Triage reporting a total from one page | **Closed.** Pages through the window; reports lower bounds under different key names when it cannot |
+| Re-reading the same order repeatedly | **Closed.** Short time-to-live cache, scoped per credential |
+| One store per process | **Built, not wired.** `tenancy.py` resolves a merchant from a hashed bearer token and gives each its own client, budget and cache. Stdio carries no token, so single-merchant mode is what runs |
+| Rate budget is in-process | Open. Move `RateLimiter` behind the same interface backed by Redis, check-and-reserve as one atomic script using server time |
+| Pull only | Open. WooCommerce webhooks into an Agent Studio trigger, with HMAC verification |

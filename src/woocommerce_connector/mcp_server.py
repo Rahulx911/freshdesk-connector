@@ -17,9 +17,10 @@ from mcp.types import ToolAnnotations
 
 from .auth import Credentials, load
 from .client import WooClient, cache_hits, requests_spent, upstream_calls
-from .errors import WooError
+from .errors import ConfigError, WooError
 from .observability import UPSTREAM_REQUESTS, audit, configure_logging
 from .service import WooService
+from .tenancy import RegistryWatcher
 
 SERVER_NAME = "woocommerce-connector"
 
@@ -49,7 +50,11 @@ INSTRUCTIONS = inspect.cleandoc("""
 
 
 class ServiceProvider:
-    """Builds one service per process from the configured credentials."""
+    """Builds one service per process from the configured credentials.
+
+    Single-merchant mode: credentials come from the environment or the 0600
+    store, and every call uses them.
+    """
 
     def __init__(self, creds: Credentials | None = None, **service_kwargs: Any):
         self._creds = creds
@@ -66,6 +71,48 @@ class ServiceProvider:
         if self._service is not None:
             await self._service.client.aclose()
             self._service = None
+
+
+class TenantServiceProvider(ServiceProvider):
+    """Hosted mode: one service per merchant, selected by bearer token.
+
+    The tenant is resolved from the token by `RegistryWatcher`, server side.
+    It is deliberately not an argument to `get()` from anything the model can
+    influence: a prompt injection in a customer's order note must not be able
+    to name a different merchant.
+
+    Each tenant gets its own client, and therefore its own rate budget and
+    its own cache scope, so one busy merchant cannot drain or read another's.
+    """
+
+    def __init__(self, watcher: RegistryWatcher | None = None, **service_kwargs: Any):
+        super().__init__(None, **service_kwargs)
+        self._watcher = watcher or RegistryWatcher()
+        self._by_tenant: dict[str, WooService] = {}
+
+    async def for_token(self, token: str) -> WooService:
+        tenant = self._watcher.get().resolve(token)
+        existing = self._by_tenant.get(tenant.tenant_id)
+        if existing is not None:
+            return existing
+        service = WooService(
+            WooClient(tenant.credentials()),
+            redact_pii=tenant.redact_pii,
+            **{k: v for k, v in self._kwargs.items() if k != "redact_pii"},
+        )
+        self._by_tenant[tenant.tenant_id] = service
+        return service
+
+    async def get(self) -> WooService:
+        raise ConfigError(
+            "Hosted mode requires a bearer token. Call for_token() with the token "
+            "the request presented; the tenant is never taken from a tool argument."
+        )
+
+    async def aclose(self) -> None:
+        for service in self._by_tenant.values():
+            await service.client.aclose()
+        self._by_tenant.clear()
 
 
 def build_server(provider: ServiceProvider | None = None) -> FastMCP:
