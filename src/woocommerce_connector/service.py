@@ -188,6 +188,7 @@ class WooService:
         data, info = await self.client.get_page("/orders", params)
         raws = [o for o in (data or []) if isinstance(o, dict)]
 
+        currency = "INR"
         by_state: dict[str, int] = {}
         by_intent: dict[str, int] = {}
         by_gateway: dict[str, int] = {}
@@ -195,6 +196,8 @@ class WooService:
         refunded = 0.0
         unreconciled: list[dict] = []
         ranked: list[dict] = []
+        at_risk = 0.0            # refunded in the shop, unconfirmed at the gateway
+        duplicate_exposure = 0.0  # order value carrying more than one payment
 
         for raw in raws:
             sig = derive(raw, now=now)
@@ -203,6 +206,7 @@ class WooService:
                 by_intent[sig.intent] = by_intent.get(sig.intent, 0) + 1
             if sig.gateway:
                 by_gateway[sig.gateway] = by_gateway.get(sig.gateway, 0) + 1
+            currency = sig.amounts.get("currency") or currency
             gross += (sig.amounts.get("order_total") or 0) or 0
             refunded += (sig.amounts.get("refunded_total") or 0) or 0
 
@@ -225,8 +229,12 @@ class WooService:
                 }
                 ranked.append(entry)
             if (sig.reconciliation or {}).get("status") == "refund_not_confirmed_at_gateway":
+                amount = (sig.amounts or {}).get("refunded_total") or 0
+                at_risk += amount
                 unreconciled.append({"id": raw.get("id"), "number": raw.get("number"),
-                                     "total": raw.get("total")})
+                                     "refunded_amount": amount, "total": raw.get("total")})
+            if (sig.reconciliation or {}).get("status") == "multiple_payments":
+                duplicate_exposure += (sig.amounts or {}).get("order_total") or 0
 
         ranked.sort(key=lambda e: (-e["score"], e["id"] or 0))
         return fit_response({
@@ -240,6 +248,10 @@ class WooService:
             "by_intent": dict(sorted(by_intent.items(), key=lambda kv: -kv[1])),
             "by_gateway": dict(sorted(by_gateway.items(), key=lambda kv: -kv[1])),
             "refunds_not_confirmed_at_gateway": unreconciled,
+            # The two numbers a merchant actually reacts to. Both are money
+            # already exposed, measured from their own orders, before the
+            # agent has answered a single question.
+            "money_at_risk": _money_at_risk(currency, at_risk, duplicate_exposure, unreconciled, by_intent),
             "needs_attention": ranked[: max(1, min(top, 50))],
         }, list_key="needs_attention")
 
@@ -262,6 +274,35 @@ class WooService:
             out["message"] = str(exc)
         out["rate_budget"] = await self.client.rl.stats()
         return out
+
+
+def _money_at_risk(currency: str, unconfirmed: float, duplicate: float,
+                   rows: list[dict], by_intent: dict[str, int]) -> dict:
+    """The headline a shop manager reacts to.
+
+    Counting categories is an engineer's summary. A merchant wants the amount
+    of their money that is currently exposed, which is what these two lines
+    are: refunds the shop believes it has paid but the gateway never
+    confirmed, and order value sitting under more than one payment.
+    """
+    out: dict[str, Any] = {"currency": currency}
+    if rows:
+        out["unconfirmed_refunds"] = {
+            "orders": len(rows),
+            "amount": round(unconfirmed, 2),
+            "meaning": ("Recorded as refunded in WooCommerce with no Razorpay refund id. "
+                        "The customer may have been told their money is on the way when it "
+                        "never left the gateway."),
+        }
+    if duplicate:
+        out["possible_double_charges"] = {
+            "orders": by_intent.get("double_charge", 0),
+            "order_value": round(duplicate, 2),
+            "meaning": ("More than one Razorpay payment id against a single order. The "
+                        "customer may have been charged twice."),
+        }
+    out["total_exposed"] = round(unconfirmed + duplicate, 2)
+    return out
 
 
 def _summarise_orders(orders: list[dict]) -> dict:

@@ -6,7 +6,7 @@ Context for Claude Code working in this repo. Read this first; details live in `
 
 A **read-only, payment-aware WooCommerce connector exposed as an MCP server** for Razorpay **Agent Studio** agents. It was built as the Razorpay Forward-Deployed Engineer take-home, **Option 3** ("build a private connector for a merchant tool"; WooCommerce chosen from Freshdesk / Zoho Inventory / WooCommerce / Unicommerce).
 
-The differentiator is **reconciliation**: a WooCommerce refund row only proves a shop manager clicked refund. Whether Razorpay moved the money is a different fact, recorded as a `rfnd_` id. `signals.reconciliation` surfaces that gap, and `store_pulse` ranks the backlog with reasons.
+The differentiator is **reconciliation across two systems**: a WooCommerce refund row only proves a shop manager clicked refund. Whether Razorpay moved the money is a different fact. `signals.reconciliation` surfaces the gap from the store side, and a **paired read-only Razorpay connector** (`src/razorpay_connector/`) resolves it into one of five verdicts, each with a `customer_safe_message`.
 
 **The earlier Freshdesk version of this assignment is preserved on the `freshdesk-connector` branch.** Do not delete it.
 
@@ -26,22 +26,30 @@ src/woocommerce_connector/
   observability.py JSON logs, audit line per tool call (PII-masked), Prometheus metrics
   mcp_server.py    11 tools + 2 prompts
   cli.py           auth login|status|logout, serve, export-spec
+src/razorpay_connector/
+  reconcile.py     the cross-system verdict + paise->rupee conversion (one place only)
+  service.py       verify_refund / verify_duplicate_charge
+  mcp_server.py    6 read-only tools
 deploy/woo-local/  real WordPress + WooCommerce in Docker, seeded, mints a Read-scoped key
 mock_server/       FastAPI WooCommerce test double (fictional "Kettle & Leaf" data)
+mock_razorpay/     FastAPI Razorpay test double (amounts in paise)
 evals/             19 agent scenarios + harness (oracle mode needs no API key)
-tests/             184 tests incl. Hypothesis fuzzing and API conformance
-docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, FDE_PLAYBOOK, mcp_tool_spec.json
+tests/             210 tests incl. Hypothesis fuzzing and API conformance
+docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, FDE_PLAYBOOK,
+                   DESIGN_RATIONALE, mcp_tool_spec.json, razorpay_tool_spec.json
 ```
 
 ## Commands
 
 ```bash
 python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-pytest -q                                   # 184 tests (~10s)
+pytest -q                                   # 210 tests (~10s)
 python -m evals.run --oracle                # expect 19/19 (no API key needed)
 python scripts/demo.py                      # expect "26/26 checks passed"
+python scripts/demo_reconcile.py            # expect "11/11" (both connectors)
 ruff check . && mypy && bandit -q -r src    # all must be clean (CI enforces)
 woocommerce-connector export-spec -o docs/mcp_tool_spec.json   # after ANY tool/description change
+razorpay-connector export-spec -o docs/razorpay_tool_spec.json
 
 # real store, no accounts needed:
 cd deploy/woo-local && docker compose up -d && ./bootstrap.sh
@@ -63,7 +71,8 @@ python scripts/assert_read_only.py          # proves the key cannot write
 
 - **Basic auth silently fails over plain HTTP.** WooCommerce only tries it when `is_ssl()`; otherwise it falls through to OAuth and an unsigned request authenticates as nobody, surfacing as `cannot_view`. That is why `oauth.py` exists.
 - **The tool spec is checked by a test.** Regenerate `docs/mcp_tool_spec.json` after any tool or docstring change.
-- **The tool count is asserted** (11) in `test_mcp.py` and `test_cli.py`.
+- **The tool count is asserted**: 11 for WooCommerce (`test_mcp.py`, `test_cli.py`), 6 for Razorpay (`test_razorpay.py`).
+- **Money crosses systems in two units.** Razorpay is paise, WooCommerce is rupees. `reconcile.paise_to_major` is the only conversion; do not add a second.
 - **WooCommerce needs WordPress 7+.** The local stack pins `wordpress:php8.3-apache`, not a 6.x tag.
 - Docstrings become tool descriptions; `inspect.cleandoc` keeps 3.13 and older identical.
 
