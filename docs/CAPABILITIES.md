@@ -35,6 +35,18 @@ reach, written for whoever has to decide whether to trust it with a merchant.
 - Rank the backlog with `store_pulse`, every entry carrying the plain-language
   reasons behind its score.
 
+### With the paired Razorpay connector
+- Resolve a payment reference into what the gateway actually did.
+- Answer "did the refund reach the customer?" with one of five verdicts:
+  `confirmed`, `in_flight`, `failed`, `never_issued`, `amount_mismatch`.
+  Each carries a `customer_safe_message` phrased not to promise money that
+  has not moved.
+- Confirm or clear a suspected double charge. Two payment ids on one order is
+  routine, because a retry makes one; two *captures* means the customer paid
+  twice, and only the gateway can tell those apart.
+- Report whether the key is test or live, because test-mode figures describe
+  money that does not exist.
+
 ### Operationally
 - Report its own health, the key's visibility and the remaining rate budget.
 - Degrade predictably: structured JSON errors with an actionable `hint`,
@@ -47,9 +59,11 @@ reach, written for whoever has to decide whether to trust it with a merchant.
   notes, no customer edits. The connector issues only `GET`, and the
   WooCommerce key it uses is Read-scoped, so the store refuses writes
   independently of this code.
-- **Call Razorpay.** It finds the references; it does not look them up. Until
-  a Razorpay tool is paired with it, `reconciliation` tells you where to look,
-  not what the gateway says.
+- **Re-issue a refund, or reverse a duplicate charge.** The Razorpay
+  connector is read-only too. It names the action; a human performs it.
+- **Reconcile without a payment reference.** An order paid by another gateway,
+  or one where the plugin stored no `pay_` id, cannot be checked. The verdict
+  is withheld rather than guessed.
 - **Decide anything financial.** It will not tell a customer a refund has
   arrived. The prompts are written to stop exactly that.
 
@@ -95,3 +109,5 @@ plausible implementation that is wrong against a real store.
 | `woocommerce_rest_cannot_view` arrives as 401 on some hosts, 403 on others | A scoped-out key is misreported as a revoked one |
 | WooCommerce 8.2+ moved orders out of `wp_posts` (HPOS) | The legacy `post.php` admin link 404s, so every citation is broken |
 | A bare date in `after` is treated as midnight | Same-day orders silently disappear from the results |
+| Razorpay returns amounts in **paise**, WooCommerce in rupees | Every figure quoted to a customer is wrong by a factor of 100 |
+| Razorpay answers **400, not 404**, for an id that does not exist | A missing payment is reported as a malformed request |

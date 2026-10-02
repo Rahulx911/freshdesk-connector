@@ -15,6 +15,25 @@ A generic WooCommerce reader hands an agent an order marked `refunded` and leave
 | **One-call triage** | `store_pulse`: the recent order mix by payment state, intent and gateway, plus a ranked `needs_attention` list **with reasons** | The question a shop manager asks every morning, answered in one call |
 | **Citations** | `source_url` deep link on every record, HPOS-aware | Answers can be checked in wp-admin with one click |
 
+### What a plain connector answers, and what this one answers
+
+Same order, same customer question, same moment.
+
+| | A plain WooCommerce reader | This pair |
+|---|---|---|
+| Reads | `status: refunded`, `net payment: 0` | the same, plus Razorpay has no refund against the payment |
+| Tells the customer | "Your refund has been processed." | "Your refund has been approved in our system but has not actually been sent yet. I am escalating this now." |
+| Tells the merchant | nothing | "Issue the refund in Razorpay against `pay_NrT4bM9cPqWxYz`. The customer may already have been told it was done." |
+| Outcome | a customer waiting for money that is not coming, and a second angry contact in a week | the refund goes out today |
+
+The plain answer is not a bug in the reader. It is a faithful report of what WooCommerce says. The money is simply not in WooCommerce.
+
+### Two connectors, one grounded answer
+
+```bash
+python scripts/demo_reconcile.py     # 11/11 checks
+```
+
 ### WooCommerce agrees with us
 
 This is not a theory about how merchants get refunds wrong. When a shop manager marks an order refunded, WooCommerce writes this note on the order itself:
@@ -58,9 +77,10 @@ That is the store refusing, not us.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
-python scripts/demo.py        # 26/26 checks
+python scripts/demo.py            # 26/26 checks
+python scripts/demo_reconcile.py  # 11/11, the two-connector story
 python -m evals.run --oracle  # 19/19 agent scenarios, no API key needed
-pytest -q                     # 184 tests
+pytest -q                     # 210 tests
 ```
 
 **Against a real WooCommerce**, also with no accounts, because WooCommerce is self-hostable:
@@ -77,14 +97,17 @@ This is the reason WooCommerce was chosen: the whole thing is verifiable end to 
 
 ## What's in it
 
-| Assignment asks for | Where |
-|---|---|
-| OAuth **or** API-key auth flow | **Both.** HTTP Basic with a consumer key/secret over HTTPS, and full **OAuth 1.0a one-legged signing** for plain-HTTP stores (`oauth.py`), because that is the only thing WooCommerce accepts without TLS. Keys verified at `auth login`, stored `0600`, or taken from the environment |
-| list / get / search primitives | 11 tools: `list_orders`, `search_orders`, `get_order`, `list_order_refunds`, `list_products`, `get_product`, `find_customers`, `get_customer`, `customer_order_history`, `store_pulse`, `connector_status`, plus 2 MCP prompts |
-| Rate-limit handling | WooCommerce core ships **no** rate limiter, so the budget is enforced client side over a sliding 60s window with a 20% reserve, and raised only when the store advertises a real limit. `429` and `503` both honour `Retry-After`; waits are bounded and fail fast with `retry_after_seconds` |
-| MCP tool specification | `mcp_server.py`; exported JSON in [`docs/mcp_tool_spec.json`](docs/mcp_tool_spec.json) |
-| What the agent can and can't do | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) |
-| How I'd roll this out with a merchant | [`docs/FDE_PLAYBOOK.md`](docs/FDE_PLAYBOOK.md) |
+| Assignment asks for | Where | Status |
+|---|---|---|
+| A connector an agent can use to read orders | 11 read-only MCP tools over `wc/v3` | done |
+| Working OAuth **or** API-key auth flow | **Both.** HTTP Basic over HTTPS, and OAuth 1.0a one-legged signing for plain-HTTP stores (`oauth.py`) | done |
+| Suitable list / get / search primitives | `list_orders`, `search_orders`, `get_order`, `list_order_refunds`, `list_products`, `get_product`, `find_customers`, `get_customer`, `customer_order_history` | done |
+| Rate-limit handling | Client-side sliding budget with reserve, `429`/`503` `Retry-After`, bounded waits that fail fast with `retry_after_seconds` | done |
+| MCP tool specification | [`docs/mcp_tool_spec.json`](docs/mcp_tool_spec.json), checked against the code by a test | done |
+| Short doc on what the agent can and cannot do | [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) | done |
+
+**Beyond the brief:** a paired Razorpay connector that resolves the references, a real WooCommerce store in Docker so everything is verifiable without an account, a 19-scenario eval harness, and a rollout playbook. See below.
+
 
 ## Layout
 
@@ -103,10 +126,18 @@ src/woocommerce_connector/
   mcp_server.py    11 tools + 2 prompts, _call wrapper
   cli.py           auth login|status|logout, serve, export-spec
 deploy/woo-local/  a real WordPress + WooCommerce store in Docker, seeded, with a read-only key
+src/razorpay_connector/
+  auth.py          key id/secret, test-vs-live mode read from the key itself
+  client.py        Razorpay REST client, same budget and backoff discipline
+  reconcile.py     the cross-system verdict: confirmed / in_flight / failed / never_issued
+  service.py       5 primitives + verify_refund + verify_duplicate_charge
+  mcp_server.py    6 read-only tools
 mock_server/       FastAPI WooCommerce test double (fictional "Kettle & Leaf" data)
+mock_razorpay/     FastAPI Razorpay test double (amounts in paise, as the real API)
 evals/             19 agent scenarios + harness (oracle mode needs no API key)
-tests/             184 tests including Hypothesis fuzzing and API conformance
-docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING, FDE_PLAYBOOK, mcp_tool_spec.json
+tests/             210 tests including Hypothesis fuzzing and API conformance
+docs/              CAPABILITIES, ARCHITECTURE, SECURITY, RUNBOOK, TESTING,
+                   FDE_PLAYBOOK, DESIGN_RATIONALE, mcp_tool_spec.json
 ```
 
 ## Honest limitations
@@ -116,4 +147,5 @@ Read [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) for the full list. The short
 - **Read-only.** No refunds, no status changes, no cancellations. Those need a human.
 - **Single replica.** The rate budget is in-process. Several replicas against one store need a shared backend.
 - **WooCommerce core only.** Subscriptions and Bookings expose their own endpoints that are not wired up.
-- **The Razorpay side is not called.** The connector finds the references; pairing it with a Razorpay Payments/Refunds tool is the obvious next step and is what makes `reconciliation` actionable rather than advisory.
+- **The Razorpay connector runs against a mock gateway**, not a real Razorpay account, because that needs a merchant signup. The WooCommerce half runs against a real store.
+- **No write path anywhere.** Re-issuing a failed refund is named as an action for a human, never performed.

@@ -36,6 +36,8 @@ jobs:
         run: pytest -q --cov --cov-report=term
       - name: End-to-end MCP demo against the mock store
         run: python scripts/demo.py
+      - name: Two-connector reconciliation demo (WooCommerce + Razorpay)
+        run: python scripts/demo_reconcile.py
 
   evals:
     name: agent evals

@@ -1,0 +1,147 @@
+{
+  "server": {
+    "name": "razorpay-connector",
+    "mode": "read-only"
+  },
+  "tools": [
+    {
+      "name": "get_payment",
+      "description": "Look up one Razorpay payment by its `pay_` id.\n\nReturns status, method, amount in rupees, how much has been refunded,\nand the bank reference or card ARN a customer's bank can trace.",
+      "input_schema": {
+        "properties": {
+          "payment_id": {
+            "title": "Payment Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "payment_id"
+        ],
+        "title": "get_paymentArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "list_payment_refunds",
+      "description": "List every refund Razorpay holds against one payment.\n\nAn empty list against an order the shop marked refunded is the\nsignal that matters: the money never left the gateway.",
+      "input_schema": {
+        "properties": {
+          "payment_id": {
+            "title": "Payment Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "payment_id"
+        ],
+        "title": "list_payment_refundsArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "get_refund",
+      "description": "Look up one refund by its `rfnd_` id.\n\nStatus is the field to read: `processed` means the money has gone,\n`pending` means it has not yet, `failed` means it bounced and a human\nmust re-issue it.",
+      "input_schema": {
+        "properties": {
+          "refund_id": {
+            "title": "Refund Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "refund_id"
+        ],
+        "title": "get_refundArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "verify_refund",
+      "description": "Did the refund the shop recorded actually reach the customer?\n\nThis is the tool to reach for whenever a WooCommerce order says\nrefunded. Pass the `pay_` id and the shop's refunded amount from\n`signals.amounts.refunded_total`.\n\nThe verdict is one of: `confirmed` (safe to tell the customer),\n`in_flight` (accepted, not settled), `failed` (bounced, act today),\n`never_issued` (the shop thinks it refunded and the gateway has no\nrecord), or `amount_mismatch`. Use `customer_safe_message` rather\nthan writing your own wording.",
+      "input_schema": {
+        "properties": {
+          "payment_id": {
+            "title": "Payment Id",
+            "type": "string"
+          },
+          "shop_refunded_amount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Shop Refunded Amount"
+          }
+        },
+        "required": [
+          "payment_id"
+        ],
+        "title": "verify_refundArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "verify_duplicate_charge",
+      "description": "Was a suspected double charge real?\n\nPass the payment ids the store attached to one order. Two ids is\nroutine, because a retry creates one. Two *captures* means the\ncustomer paid twice. Only the gateway can tell these apart.",
+      "input_schema": {
+        "properties": {
+          "payment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Payment Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "payment_ids"
+        ],
+        "title": "verify_duplicate_chargeArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    },
+    {
+      "name": "razorpay_status",
+      "description": "Check the Razorpay connection and whether the key is test or live.\n\nRead the mode before quoting any figure to a customer. Test-mode data\ndescribes money that does not exist.",
+      "input_schema": {
+        "properties": {},
+        "title": "razorpay_statusArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      }
+    }
+  ]
+}
