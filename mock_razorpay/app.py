@@ -69,6 +69,14 @@ async def gate(request: Request, call_next):
     return await call_next(request)
 
 
+@app.get("/v1/payments")
+async def list_payments(count: int = 10, skip: int = 0):
+    """Razorpay pages with count and skip, not page and per_page."""
+    rows = sorted(data.PAYMENTS.values(), key=lambda p: p["created_at"], reverse=True)
+    window = rows[skip: skip + max(1, min(count, 100))]
+    return JSONResponse({"entity": "collection", "count": len(window), "items": window})
+
+
 @app.get("/v1/payments/{payment_id}")
 async def get_payment(payment_id: str):
     payment = data.PAYMENTS.get(payment_id)

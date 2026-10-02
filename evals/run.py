@@ -11,7 +11,9 @@ bundled mock WooCommerce store:
                                     # Runs in CI: guards the connector and the
                                     # dataset together, with no API key.
 
-  python -m evals.run --llm         # Claude drives the tools (needs ANTHROPIC_API_KEY).
+  python -m evals.run --llm         # Claude drives the tools. Needs credentials, which
+                                    # the SDK resolves from ANTHROPIC_API_KEY, an auth
+                                    # token, or an `ant auth login` profile.
         [--model claude-sonnet-5] [--repeats 3]
                                     # Scores tool selection, argument correctness,
                                     # answer facts, and safety: specifically that the
@@ -177,6 +179,46 @@ class AnthropicLLM:
         )
 
 
+def llm_credential_problem() -> str | None:
+    """Return a message if --llm cannot run, or None if it can.
+
+    An unset ANTHROPIC_API_KEY does not mean there are no credentials. The
+    SDK resolves them in order: ANTHROPIC_API_KEY, then ANTHROPIC_AUTH_TOKEN,
+    then a profile stored by `ant auth login`. Demanding the environment
+    variable specifically would refuse to run for someone who is perfectly
+    well authenticated, so let the SDK decide and only report what is
+    actually missing.
+    """
+    try:
+        from anthropic import AsyncAnthropic
+    except ImportError:
+        return ("--llm needs the Anthropic SDK: pip install -e \".[evals]\"\n"
+                "(--oracle needs no SDK and no credentials.)")
+    try:
+        client = AsyncAnthropic()
+        # The constructor succeeds with no credentials and fails at request
+        # time, which would report nineteen "failed" scenarios instead of one
+        # missing key. Check for a resolved credential up front: auth_headers
+        # is empty when the SDK found none from any source.
+        resolved = bool(client.api_key or client.auth_token or dict(client.auth_headers))
+    except Exception as exc:
+        return (
+            f"--llm cannot build a client: {type(exc).__name__}: {exc}\n"
+            "  pip install -e \".[evals]\" and provide credentials."
+        )
+    if not resolved:
+        return (
+            "--llm found no Anthropic credentials, so every scenario would fail with an\n"
+            "authentication error rather than telling you what is wrong.\n"
+            "Provide credentials in any of these ways:\n"
+            "  export ANTHROPIC_API_KEY=sk-ant-...   (from console.anthropic.com)\n"
+            "  export ANTHROPIC_AUTH_TOKEN=...\n"
+            "  ant auth login                        (stores a profile the SDK reads)\n"
+            "--oracle runs the same 19 scenarios with no model and no credentials."
+        )
+    return None
+
+
 def _block(b: Any, key: str, default: Any = None) -> Any:
     return b.get(key, default) if isinstance(b, dict) else getattr(b, key, default)
 
@@ -275,9 +317,11 @@ async def main() -> int:
     if args.only:
         keep = set(args.only.split(","))
         cases = [c for c in cases if c["id"] in keep]
-    if args.llm and not os.environ.get("ANTHROPIC_API_KEY"):
-        print("--llm needs ANTHROPIC_API_KEY", file=sys.stderr)
-        return 2
+    if args.llm:
+        problem = llm_credential_problem()
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
 
     with mock_store() as url:
         env = {**os.environ, "WOO_STORE_URL": url,
