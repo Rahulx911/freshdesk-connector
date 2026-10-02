@@ -86,12 +86,18 @@ pytest -q                     # 210 tests
 **Against a real WooCommerce**, also with no accounts, because WooCommerce is self-hostable:
 
 ```bash
-cd deploy/woo-local && docker compose up -d && ./bootstrap.sh
-# prints a Read-scoped key; then, from the repo root:
+cd deploy/woo-local
+docker compose up -d && ./bootstrap.sh   # prints a Read-scoped key
+
+cd ../..                                  # the scripts live at the repo root
 export WOO_STORE_URL=http://localhost:8080
-export WOO_CONSUMER_KEY=ck_...  WOO_CONSUMER_SECRET=cs_...
-python scripts/demo.py --live  # 15/15 checks against WordPress 7.1 + WooCommerce 11.1
+export WOO_CONSUMER_KEY=ck_...            # the real values bootstrap printed
+export WOO_CONSUMER_SECRET=cs_...
+python scripts/demo.py --live             # 15/15 against WordPress 7.1 + WooCommerce 11.1
+python scripts/assert_read_only.py        # the store itself refuses a write
 ```
+
+Re-running `bootstrap.sh` is safe: it detects an already-seeded store and does nothing.
 
 This is the reason WooCommerce was chosen: the whole thing is verifiable end to end on a laptop, with no trial, no credit card and no vendor account.
 

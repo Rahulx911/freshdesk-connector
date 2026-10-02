@@ -15,6 +15,20 @@ if ( ! class_exists( 'WooCommerce' ) ) {
 update_option( 'woocommerce_currency', 'INR' );
 update_option( 'woocommerce_default_country', 'IN:KA' );
 
+/**
+ * Seeding twice would double every order, which quietly changes the numbers
+ * the demos and the docs quote. Re-running bootstrap.sh is a normal thing to
+ * do, so the seed has to be idempotent. Set FORCE_SEED=1 to add another set
+ * deliberately.
+ */
+// type must be set: wc_get_orders() counts refund objects as orders otherwise.
+$existing = wc_get_orders( [ 'limit' => -1, 'return' => 'ids', 'type' => 'shop_order', 'status' => 'any' ] );
+if ( ! empty( $existing ) && getenv( 'FORCE_SEED' ) !== '1' ) {
+    WP_CLI::success( 'Store already seeded (' . count( $existing ) . ' orders). Nothing to do.' );
+    WP_CLI::log( 'To wipe and start over: docker compose down -v && docker compose up -d && ./bootstrap.sh' );
+    return;
+}
+
 /** Create (or reuse) a simple product. */
 function kl_product( $name, $sku, $price, $stock_status = 'instock' ) {
     $existing = wc_get_product_id_by_sku( $sku );

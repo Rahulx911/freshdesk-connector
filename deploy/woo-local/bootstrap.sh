@@ -47,7 +47,7 @@ wp rewrite flush --hard
 
 echo "==> seeding fictional store data"
 docker compose cp seed.php wordpress:/var/www/html/seed.php
-wp eval-file seed.php
+docker compose run --rm -T -e FORCE_SEED="${FORCE_SEED:-0}" wpcli eval-file seed.php
 
 echo "==> creating a READ-ONLY REST API key"
 # WooCommerce stores the consumer key as an HMAC-SHA256 hash and the secret in
@@ -80,13 +80,17 @@ cat <<SUMMARY
   Admin      $SITE_URL/wp-admin  ($ADMIN_USER / $ADMIN_PASS)
   Key scope  read   (this key physically cannot write)
 
-  Run the connector against it:
+  Run the connector against it. Note the cd: the scripts live at the
+  repository root, not in this folder.
 
+    cd ../..
     export WOO_STORE_URL=$SITE_URL
     export WOO_CONSUMER_KEY=$CK
     export WOO_CONSUMER_SECRET=$CS
     python scripts/demo.py --live
+    python scripts/assert_read_only.py
 
-  Tear down with:  docker compose down -v
+  Re-running this script will not duplicate the data.
+  Tear down with:  docker compose down -v   (from deploy/woo-local)
 ================================================================
 SUMMARY
