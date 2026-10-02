@@ -53,6 +53,22 @@ async def main() -> int:
         print("Get them from the Razorpay dashboard: Settings > API Keys, in Test Mode.")
         return 2
 
+    # Placeholders copied straight out of a README reach the real API and come
+    # back as a 401, which reads like "your account is broken" rather than
+    # "you pasted the example". Catch them here.
+    placeholder = [
+        name for name, value in (("RAZORPAY_KEY_ID", key_id),
+                                 ("RAZORPAY_KEY_SECRET", key_secret))
+        if "..." in value or value in ("rzp_test_", "x", "y", "changeme")
+    ]
+    if placeholder:
+        print(f"{YELLOW}{', '.join(placeholder)} still contains the example value, "
+              f"not a real key.{RESET}")
+        print("Copy the actual values from the Razorpay dashboard: Settings > API Keys,")
+        print("with the Test Mode toggle on. The id looks like rzp_test_ followed by")
+        print("14 characters, and the secret is a separate 24-character string.")
+        return 2
+
     if not key_id.startswith("rzp_test_"):
         print(f"{YELLOW}Refusing to run: {key_id[:12]}… is not a test-mode key.{RESET}")
         print("This script only reads, but a live key describes real customer money.")
